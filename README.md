@@ -22,12 +22,12 @@ Toàn bộ là **file tĩnh** (HTML/CSS/JS thuần, không cần build) + **Fire
 ## 1. Tạo Firebase project (làm 1 lần, khoảng 5 phút)
 
 1. Vào https://console.firebase.google.com → **Add project** → đặt tên tuỳ ý → tạo xong.
-2. Trong project, vào **Build → Authentication → Get started** → tab **Sign-in method** → bật **Email/Password**.
+2. Trong project, vào **Build → Authentication → Get started** → tab **Sign-in method** → bật **Anonymous** (không cần bật Email/Password — app này chỉ cần nhập tên, không cần mật khẩu).
 3. Vào **Build → Firestore Database → Create database** → chọn **Start in test mode** (để chạy thử nhanh; xem mục 4 để siết bảo mật trước khi dùng thật).
 
 > Không cần bật **Firebase Storage**. Google hiện yêu cầu nâng cấp lên gói trả phí (Blaze) mới dùng được Storage, nên bản này lưu ảnh/PDF trên bảng trắng bằng cách **nén nhỏ lại và nhúng thẳng vào Firestore** (xem mục 5) — không cần thẻ ngân hàng, không cần nâng cấp gói.
 4. Vào **Project settings** (biểu tượng bánh răng) → kéo xuống **Your apps** → bấm icon Web `</>` → đặt tên app → **Register app**. Firebase sẽ hiện đoạn `firebaseConfig = {...}`.
-5. Copy đoạn config đó, dán đè vào file `js/firebase-config.js` (thay các dòng `apiKey`, `authDomain`, `projectId`, ...).
+5. Copy đoạn config đó, dán đè vào file `firebase-config.js` (thay các dòng `apiKey`, `authDomain`, `projectId`, ...).
 
 ## 2. Chạy thử trên máy
 
@@ -44,7 +44,7 @@ rồi mở địa chỉ hiện ra. **Lưu ý:** tính năng camera/màn hình y�
 1. Tạo 1 repo GitHub mới, push toàn bộ thư mục này lên.
 2. Vào **Settings → Pages** của repo → chọn nhánh `main`, thư mục `/ (root)` → Save.
 3. Sau ít phút, GitHub cho bạn 1 link dạng `https://ten-user.github.io/ten-repo/`. Đây là link bạn gửi cho học sinh.
-4. Học sinh mở link → bấm **Đăng ký** → chọn vai trò **Học viên** → tạo tài khoản → vào trang **Lớp của tôi** → nhập mã lớp bạn cung cấp (hoặc bạn có thể copy "link mời" đã kèm sẵn mã từ trang giáo viên).
+4. Học sinh mở link → chọn vai trò **Học viên** → nhập tên → **Bắt đầu** → vào trang **Lớp của tôi** → nhập mã lớp bạn cung cấp (hoặc bạn có thể copy "link mời" đã kèm sẵn mã từ trang giáo viên).
 
 ## 4. Firestore Security Rules (nên làm trước khi dùng thật)
 
@@ -98,7 +98,7 @@ service cloud.firestore {
 
 Với lớp tối đa khoảng 12 người, bản này chạy trong đúng vùng thoải mái của kiến trúc hiện tại — không cần lo về giới hạn quy mô. Camera đã được giới hạn ở độ phân giải 640×360/24fps (đủ nét cho lớp học, nhẹ băng thông) để giáo viên nhận cùng lúc nhiều luồng hình học viên vẫn mượt. Vẫn có vài khác biệt thật sự so với ClassIn nên bạn nên biết:
 
-- **Không có TURN server riêng, chỉ dùng TURN miễn phí công cộng (OpenRelay)** — giúp tăng tỷ lệ kết nối thành công qua mạng có tường lửa/NAT chặt (mạng trường học, mạng công ty, 4G), nhưng TURN miễn phí dùng chung có thể chậm vào giờ cao điểm. Muốn ổn định lâu dài, nên đăng ký TURN riêng (Metered.ca, Twilio, Xirsys — vài trăm nghìn/tháng) và thay vào `RTC_CONFIG` trong `js/classroom.js`.
+- **Không có TURN server riêng, chỉ dùng TURN miễn phí công cộng (OpenRelay)** — giúp tăng tỷ lệ kết nối thành công qua mạng có tường lửa/NAT chặt (mạng trường học, mạng công ty, 4G), nhưng TURN miễn phí dùng chung có thể chậm vào giờ cao điểm. Muốn ổn định lâu dài, nên đăng ký TURN riêng (Metered.ca, Twilio, Xirsys — vài trăm nghìn/tháng) và thay vào `RTC_CONFIG` trong `classroom.js`.
 - **Không có "adaptive bitrate"** (tự động giảm chất lượng khi mạng yếu) — mạng ai đó yếu có thể làm hình giật/đứng thay vì tự hạ chất lượng êm như app thương mại.
 - **Bảng trắng đã tối ưu để chỉ vẽ thêm nét mới**, không vẽ lại toàn bộ mỗi lần — mượt kể cả sau buổi học dài.
 - **Chat/bảng trắng đồng bộ qua Firestore**, độ trễ thường 100–300ms — đủ nhanh cho lớp học.
@@ -108,15 +108,20 @@ Với lớp tối đa khoảng 12 người, bản này chạy trong đúng vùng
 
 ## 7. Cấu trúc file
 
+Toàn bộ file nằm phẳng trong 1 thư mục, **không có thư mục con** — để tránh lỗi rớt file khi kéo-thả lên GitHub:
+
 ```
-index.html          Đăng nhập / đăng ký
+index.html          Trang vào lớp (nhập tên + chọn vai trò)
 teacher.html         Dashboard giáo viên (tạo lớp, mã lớp)
-student.html          Dashboard học viên (tham gia lớp bằng mã)
-classroom.html        Phòng học trực tiếp
-css/style.css         Toàn bộ giao diện
-js/firebase-config.js Cấu hình Firebase (bạn cần điền)
-js/auth.js            Đăng nhập/đăng ký
-js/teacher.js         Logic dashboard giáo viên
-js/student.js         Logic dashboard học viên
-js/classroom.js       WebRTC + bảng trắng + ghi hình + quyền
+student.html         Dashboard học viên (tham gia lớp bằng mã)
+classroom.html       Phòng học trực tiếp
+style.css            Toàn bộ giao diện
+firebase-config.js   Cấu hình Firebase (bạn cần điền)
+auth.js              Vào lớp (đăng nhập ẩn danh bằng tên)
+teacher.js           Logic dashboard giáo viên
+student.js           Logic dashboard học viên
+classroom.js         WebRTC + bảng trắng + ghi hình + quyền
 ```
+
+Khi tải lên GitHub (mục 3), kéo **toàn bộ các file trên vào cùng lúc** — không có thư mục nào cần kéo riêng nữa.
+

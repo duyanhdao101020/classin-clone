@@ -1,110 +1,162 @@
-let mode = 'login'; // 'login' | 'signup'
-let role = 'student';
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LopHoc — Phòng học</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> <span id="class-name">Phòng học</span></div>
+    <div style="display:flex; align-items:center; gap:14px;">
+      <span class="timer mono" id="session-timer">00:00</span>
+      <span class="who" id="who"></span>
+      <button class="btn btn-ghost btn-sm" onclick="leaveRoom()">Rời phòng</button>
+    </div>
+  </div>
 
-const formTitle = document.getElementById('form-title');
-const formSub = document.getElementById('form-sub');
-const roleToggle = document.getElementById('role-toggle');
-const nameField = document.getElementById('name-field');
-const submitBtn = document.getElementById('submit-btn');
-const switchText = document.getElementById('switch-text');
-const switchLink = document.getElementById('switch-link');
-const errBox = document.getElementById('err');
+  <div class="classroom">
+    <div class="stage">
+      <div class="stage-tabs">
+        <button class="active" data-tab="video" onclick="switchTab('video')">📹 Video</button>
+        <button data-tab="board" onclick="switchTab('board')">📝 Bảng trắng</button>
+        <button data-tab="chat" onclick="switchTab('chat')">💬 Trò chuyện</button>
+      </div>
 
-function showError(msg){
-  errBox.textContent = msg;
-  errBox.classList.add('show');
-}
-function clearError(){
-  errBox.classList.remove('show');
-  errBox.textContent = '';
-}
+      <div class="stage-body">
+        <div class="video-view active" id="video-view">
+          <div class="video-grid" id="video-grid">
+            <!-- các tile video (giáo viên, học viên, bản thân) được JS tạo động -->
+          </div>
+          <div class="video-empty" id="video-empty" style="display:none;">
+            Chưa có ai bật camera / chia sẻ màn hình.
+          </div>
+        </div>
 
-function renderMode(){
-  clearError();
-  if(mode === 'login'){
-    formTitle.textContent = 'Chào mừng trở lại';
-    formSub.textContent = 'Đăng nhập để vào lớp học của bạn';
-    roleToggle.style.display = 'none';
-    nameField.style.display = 'none';
-    submitBtn.textContent = 'Đăng nhập';
-    switchText.textContent = 'Chưa có tài khoản?';
-    switchLink.textContent = 'Đăng ký ngay';
-  } else {
-    formTitle.textContent = 'Tạo tài khoản';
-    formSub.textContent = 'Chọn vai trò của bạn để bắt đầu';
-    roleToggle.style.display = 'flex';
-    nameField.style.display = 'block';
-    submitBtn.textContent = 'Đăng ký';
-    switchText.textContent = 'Đã có tài khoản?';
-    switchLink.textContent = 'Đăng nhập';
-  }
-}
+        <div class="board-view" id="board-view">
+          <canvas id="board-canvas"></canvas>
+          <div class="board-toolbar" id="board-toolbar">
+            <button class="tool-btn active" data-tool="pen" title="Bút vẽ" onclick="setBoardTool('pen')">✏️</button>
+            <button class="tool-btn" data-tool="text" title="Chèn chữ" onclick="setBoardTool('text')">🔤</button>
+            <span class="toolbar-sep"></span>
+            <span class="swatch selected" style="background:#F5F1E8" data-color="#F5F1E8"></span>
+            <span class="swatch" style="background:#E8B94A" data-color="#E8B94A"></span>
+            <span class="swatch" style="background:#7FBF8E" data-color="#7FBF8E"></span>
+            <span class="swatch" style="background:#E2664B" data-color="#E2664B"></span>
+            <span class="toolbar-sep"></span>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('image-input').click()">🖼️ Ảnh</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pdf-input').click()">📄 PDF</button>
+            <button class="btn btn-ghost btn-sm" id="clear-board-btn" onclick="clearBoard()">Xoá bảng</button>
+            <input type="file" id="image-input" accept="image/*" hidden onchange="onImageFileChosen(event)">
+            <input type="file" id="pdf-input" accept="application/pdf" hidden onchange="onPdfFileChosen(event)">
+          </div>
+          <div class="board-hint" id="board-hint" style="display:none;">
+            Bạn chưa được cấp quyền thao tác trên bảng trắng. Giáo viên có thể cấp quyền cho bạn trong danh sách bên phải.
+          </div>
+        </div>
 
-switchLink.addEventListener('click', (e) => {
-  e.preventDefault();
-  mode = mode === 'login' ? 'signup' : 'login';
-  renderMode();
-});
+        <div class="chat-view" id="chat-view">
+          <div class="chat-messages" id="chat-messages"></div>
+          <form class="chat-input-row" id="chat-form">
+            <input type="text" id="chat-input" placeholder="Nhắn gì đó cho lớp..." autocomplete="off">
+            <button type="submit" class="btn btn-amber btn-sm">Gửi</button>
+          </form>
+        </div>
+      </div>
 
-roleToggle.querySelectorAll('button').forEach(btn => {
-  btn.addEventListener('click', () => {
-    role = btn.dataset.role;
-    roleToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-});
+      <div class="controls-bar">
+        <button class="btn btn-amber btn-sm" id="mic-btn" onclick="toggleMic()">🎤 Bật mic</button>
+        <button class="btn btn-amber btn-sm" id="cam-btn" onclick="toggleCam()">🎥 Bật camera</button>
+        <button class="btn btn-ghost btn-sm" id="share-btn" onclick="toggleScreenShare()" style="display:none;">🖥️ Chia sẻ màn hình</button>
+        <button class="btn btn-ghost btn-sm" id="hand-btn" onclick="toggleHandRaise()" style="display:none;">✋ Giơ tay</button>
+        <button class="btn btn-ghost btn-sm" id="muteall-btn" onclick="muteAllStudents()" style="display:none;">🔇 Tắt mic tất cả</button>
+        <button class="btn btn-ghost btn-sm" id="rec-btn" onclick="toggleRecording()">⏺ Ghi lại buổi học</button>
+        <button class="btn btn-ghost btn-sm" onclick="openSettingsModal()">⚙️ Âm thanh</button>
+        <div class="spacer"></div>
+        <span class="who" id="group-mesh-status"></span>
+        <span class="who" id="scope-label"></span>
+        <span class="who" id="rec-status"></span>
+        <span class="who" id="student-status"></span>
+      </div>
+    </div>
 
-document.getElementById('auth-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  clearError();
-  const email = document.getElementById('email').value.trim();
-  const password = document.getElementById('password').value;
-  const name = document.getElementById('name').value.trim();
+    <div class="sidebar">
+      <h4 class="chalk">Học viên</h4>
+      <div class="member-list" id="member-list"></div>
 
-  submitBtn.disabled = true;
-  try {
-    if (mode === 'signup') {
-      if(!name){ showError('Vui lòng nhập họ tên.'); submitBtn.disabled=false; return; }
-      const cred = await auth.createUserWithEmailAndPassword(email, password);
-      await db.collection('users').doc(cred.user.uid).set({
-        name, email, role, createdAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
-      goToDashboard(role);
-    } else {
-      const cred = await auth.signInWithEmailAndPassword(email, password);
-      const userDoc = await db.collection('users').doc(cred.user.uid).get();
-      const data = userDoc.data();
-      goToDashboard(data ? data.role : 'student');
-    }
-  } catch (err) {
-    showError(translateError(err));
-  }
-  submitBtn.disabled = false;
-});
+      <div class="group-panel" id="group-panel" style="display:none;">
+        <div class="group-panel-header">
+          <h4 class="chalk">Nhóm nhỏ</h4>
+          <button class="btn btn-ghost btn-sm" onclick="createGroup()">+ Nhóm</button>
+        </div>
+        <div class="group-row" onclick="switchScope('main')" style="cursor:pointer;">
+          <span>🏠 Cả lớp</span>
+        </div>
+        <div id="group-list"></div>
+        <div class="group-actions">
+          <button class="btn btn-amber btn-sm" id="breakout-toggle-btn" onclick="toggleBreakout()">Bắt đầu chia nhóm</button>
+        </div>
+      </div>
 
-function goToDashboard(userRole){
-  window.location.href = userRole === 'teacher' ? 'teacher.html' : 'student.html';
-}
+      <div class="room-info" id="room-info"></div>
+    </div>
+  </div>
+</div>
 
-function translateError(err){
-  const map = {
-    'auth/email-already-in-use': 'Email này đã được đăng ký.',
-    'auth/invalid-email': 'Email không hợp lệ.',
-    'auth/weak-password': 'Mật khẩu quá yếu (tối thiểu 6 ký tự).',
-    'auth/user-not-found': 'Không tìm thấy tài khoản với email này.',
-    'auth/wrong-password': 'Sai mật khẩu.',
-    'auth/invalid-credential': 'Email hoặc mật khẩu không đúng.'
-  };
-  return map[err.code] || ('Có lỗi xảy ra: ' + err.message);
-}
+<div class="modal-overlay" id="settings-modal" style="display:none;">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 class="chalk">Cài đặt âm thanh</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeSettingsModal()">✕</button>
+    </div>
 
-renderMode();
+    <div class="settings-section">
+      <label class="settings-label">Microphone</label>
+      <div class="settings-row">
+        <select id="mic-device-select" class="settings-select"></select>
+        <button class="btn btn-ghost btn-sm" id="test-mic-btn" onclick="testMic()">🔊 Nghe thử mic của bạn</button>
+      </div>
+      <div class="meter-track" id="mic-meter"></div>
+    </div>
 
-// nếu đã đăng nhập sẵn, chuyển thẳng vào dashboard tương ứng
-auth.onAuthStateChanged(async (user) => {
-  if (user) {
-    const userDoc = await db.collection('users').doc(user.uid).get();
-    const data = userDoc.data();
-    if (data) goToDashboard(data.role);
-  }
-});
+    <div class="settings-section">
+      <label class="settings-label">Loa</label>
+      <div class="settings-row">
+        <select id="speaker-device-select" class="settings-select"></select>
+        <button class="btn btn-ghost btn-sm" onclick="testSpeaker()">🔈 Kiểm tra loa</button>
+      </div>
+      <div class="settings-row">
+        <span>🔉</span>
+        <input type="range" id="speaker-volume" min="0" max="100" value="100" oninput="onSpeakerVolumeChange(this.value)">
+        <span>🔊</span>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <label class="settings-label">Cài đặt thêm</label>
+      <label class="settings-toggle-row">
+        <input type="checkbox" id="autogain-toggle" checked onchange="applyMicConstraints()">
+        Tự động điều chỉnh âm lượng mic
+      </label>
+      <label class="settings-toggle-row">
+        <input type="checkbox" id="noise-suppress-toggle" checked onchange="applyMicConstraints()">
+        Khử tiếng ồn nền <span class="settings-hint">(khuyến nghị bật hầu hết trường hợp)</span>
+      </label>
+      <label class="settings-toggle-row">
+        <input type="checkbox" id="music-mode-toggle" onchange="onMusicModeToggle()">
+        Chế độ nhạc <span class="settings-hint">(khả năng khử ồn sẽ giảm rõ rệt)</span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="firebase-config.js"></script>
+<script src="classroom.js"></script>
+</body>
+</html>
