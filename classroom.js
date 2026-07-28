@@ -103,7 +103,9 @@ auth.onAuthStateChanged(async (user) => {
   chatRef = liveRef.collection('chat');
 
   if (isTeacher) {
-    document.getElementById('share-btn').style.display = 'inline-block';
+    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+      document.getElementById('share-btn').style.display = 'inline-block';
+    } // trên điện thoại (đặc biệt iPhone/Safari) trình duyệt không hỗ trợ chia sẻ màn hình -> ẩn nút luôn, đỡ bấm vào bị lỗi
     document.getElementById('muteall-btn').style.display = 'inline-block';
     document.getElementById('group-panel').style.display = 'block';
   } else {
@@ -182,9 +184,21 @@ function ensureTile(id, label, isSelf){
 }
 
 function placeTileDefault(tile, id){
+  const grid = document.getElementById('video-grid');
+  const containerWidth = grid.clientWidth || 300;
+  const gap = 16;
+  const isMain = tile.classList.contains('main-tile');
+  const baseWidth = isMain ? 360 : 230;
+  const tileWidth = Math.min(baseWidth, Math.max(140, containerWidth - 32)); // co lại vừa màn hình hẹp, không tràn ra ngoài
+  tile.style.width = tileWidth + 'px';
+  const tileHeight = tileWidth * 9 / 16 + 34; // ước lượng thêm phần nhãn tên/mic
+
+  const cols = Math.max(1, Math.floor((containerWidth + gap) / (tileWidth + gap)));
   const idx = Object.keys(tilePositions).length;
-  const x = 16 + (idx % 3) * 250;
-  const y = 16 + Math.floor(idx / 3) * 190;
+  const col = idx % cols;
+  const row = Math.floor(idx / cols);
+  const x = 16 + col * (tileWidth + gap);
+  const y = 16 + row * (tileHeight + gap);
   tile.style.left = x + 'px';
   tile.style.top = y + 'px';
   tilePositions[id] = { x, y };
