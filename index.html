@@ -3,24 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LopHoc — Vào lớp</title>
+<title>Thiên Bình dạy tiếng Trung — Vào lớp</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="page">
   <div class="topbar">
-    <div class="brand"><span class="dot"></span> LopHoc</div>
+    <div class="brand" id="brand-logo" style="cursor:default; user-select:none;"><span class="dot"></span> Thiên Bình dạy tiếng Trung</div>
     <div class="who">Lớp học trực tuyến</div>
   </div>
 
   <div class="main">
     <div class="card auth-card">
       <h1>Vào lớp học</h1>
-      <p class="sub">Nhập tên và chọn vai trò để bắt đầu — không cần mật khẩu.</p>
+      <p class="sub" id="form-sub">Nhập tên của bạn rồi bấm "Bắt đầu" để vào lớp — không cần mật khẩu.</p>
 
       <div class="error-msg" id="err"></div>
 
-      <div class="role-toggle" id="role-toggle">
+      <div class="role-toggle" id="role-toggle" style="display:none;">
         <button type="button" class="active" data-role="student">Tôi là học viên</button>
         <button type="button" data-role="teacher">Tôi là giáo viên</button>
       </div>

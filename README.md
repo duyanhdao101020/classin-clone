@@ -41,6 +41,8 @@ rồi mở địa chỉ hiện ra. **Lưu ý:** tính năng camera/màn hình y�
 
 ## 3. Đưa lên GitHub Pages (link gửi cho học sinh)
 
+> **Cách bạn (giáo viên) vào lớp:** trang vào lớp mặc định chỉ hiện ô nhập tên (học viên không thấy lựa chọn vai trò gì cả). Để hiện lựa chọn "Tôi là giáo viên", **bấm nhanh vào logo "Thiên Bình dạy tiếng Trung" ở góc trên trái 5 lần liên tiếp** (trong 2 giây) — lựa chọn vai trò sẽ hiện ra, lúc đó chọn "Tôi là giáo viên" rồi nhập tên như bình thường. Đây chỉ là cách ẩn đơn giản để học viên không vô tình bấm nhầm, không phải bảo mật thật sự — ai biết thao tác này đều bấm được.
+
 1. Tạo 1 repo GitHub mới, push toàn bộ thư mục này lên.
 2. Vào **Settings → Pages** của repo → chọn nhánh `main`, thư mục `/ (root)` → Save.
 3. Sau ít phút, GitHub cho bạn 1 link dạng `https://ten-user.github.io/ten-repo/`. Đây là link bạn gửi cho học sinh.

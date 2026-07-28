@@ -3,6 +3,22 @@ let role = 'student';
 const roleToggle = document.getElementById('role-toggle');
 const submitBtn = document.getElementById('submit-btn');
 const errBox = document.getElementById('err');
+const formSub = document.getElementById('form-sub');
+
+// Cơ chế ẩn: bấm nhanh vào logo 5 lần (trong 2 giây) để hiện lựa chọn "Tôi là giáo viên".
+// Học viên bình thường sẽ không bao giờ thấy được — chỉ người biết mới bấm ra.
+let logoClickCount = 0;
+let logoClickTimer = null;
+document.getElementById('brand-logo').addEventListener('click', () => {
+  logoClickCount++;
+  clearTimeout(logoClickTimer);
+  logoClickTimer = setTimeout(() => { logoClickCount = 0; }, 2000);
+  if (logoClickCount >= 5) {
+    logoClickCount = 0;
+    roleToggle.style.display = 'flex';
+    formSub.textContent = 'Đã mở chế độ chọn vai trò — chọn vai trò rồi nhập tên để bắt đầu.';
+  }
+});
 
 function showError(msg){
   errBox.textContent = msg;
