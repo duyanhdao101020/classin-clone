@@ -1,0 +1,110 @@
+let mode = 'login'; // 'login' | 'signup'
+let role = 'student';
+
+const formTitle = document.getElementById('form-title');
+const formSub = document.getElementById('form-sub');
+const roleToggle = document.getElementById('role-toggle');
+const nameField = document.getElementById('name-field');
+const submitBtn = document.getElementById('submit-btn');
+const switchText = document.getElementById('switch-text');
+const switchLink = document.getElementById('switch-link');
+const errBox = document.getElementById('err');
+
+function showError(msg){
+  errBox.textContent = msg;
+  errBox.classList.add('show');
+}
+function clearError(){
+  errBox.classList.remove('show');
+  errBox.textContent = '';
+}
+
+function renderMode(){
+  clearError();
+  if(mode === 'login'){
+    formTitle.textContent = 'Chào mừng trở lại';
+    formSub.textContent = 'Đăng nhập để vào lớp học của bạn';
+    roleToggle.style.display = 'none';
+    nameField.style.display = 'none';
+    submitBtn.textContent = 'Đăng nhập';
+    switchText.textContent = 'Chưa có tài khoản?';
+    switchLink.textContent = 'Đăng ký ngay';
+  } else {
+    formTitle.textContent = 'Tạo tài khoản';
+    formSub.textContent = 'Chọn vai trò của bạn để bắt đầu';
+    roleToggle.style.display = 'flex';
+    nameField.style.display = 'block';
+    submitBtn.textContent = 'Đăng ký';
+    switchText.textContent = 'Đã có tài khoản?';
+    switchLink.textContent = 'Đăng nhập';
+  }
+}
+
+switchLink.addEventListener('click', (e) => {
+  e.preventDefault();
+  mode = mode === 'login' ? 'signup' : 'login';
+  renderMode();
+});
+
+roleToggle.querySelectorAll('button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    role = btn.dataset.role;
+    roleToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+document.getElementById('auth-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearError();
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const name = document.getElementById('name').value.trim();
+
+  submitBtn.disabled = true;
+  try {
+    if (mode === 'signup') {
+      if(!name){ showError('Vui lòng nhập họ tên.'); submitBtn.disabled=false; return; }
+      const cred = await auth.createUserWithEmailAndPassword(email, password);
+      await db.collection('users').doc(cred.user.uid).set({
+        name, email, role, createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      goToDashboard(role);
+    } else {
+      const cred = await auth.signInWithEmailAndPassword(email, password);
+      const userDoc = await db.collection('users').doc(cred.user.uid).get();
+      const data = userDoc.data();
+      goToDashboard(data ? data.role : 'student');
+    }
+  } catch (err) {
+    showError(translateError(err));
+  }
+  submitBtn.disabled = false;
+});
+
+function goToDashboard(userRole){
+  window.location.href = userRole === 'teacher' ? 'teacher.html' : 'student.html';
+}
+
+function translateError(err){
+  const map = {
+    'auth/email-already-in-use': 'Email này đã được đăng ký.',
+    'auth/invalid-email': 'Email không hợp lệ.',
+    'auth/weak-password': 'Mật khẩu quá yếu (tối thiểu 6 ký tự).',
+    'auth/user-not-found': 'Không tìm thấy tài khoản với email này.',
+    'auth/wrong-password': 'Sai mật khẩu.',
+    'auth/invalid-credential': 'Email hoặc mật khẩu không đúng.'
+  };
+  return map[err.code] || ('Có lỗi xảy ra: ' + err.message);
+}
+
+renderMode();
+
+// nếu đã đăng nhập sẵn, chuyển thẳng vào dashboard tương ứng
+auth.onAuthStateChanged(async (user) => {
+  if (user) {
+    const userDoc = await db.collection('users').doc(user.uid).get();
+    const data = userDoc.data();
+    if (data) goToDashboard(data.role);
+  }
+});
