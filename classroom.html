@@ -17,73 +17,106 @@
     </div>
   </div>
 
-  <div class="classroom">
-    <div class="stage">
-      <div class="stage-tabs">
-        <button class="active" data-tab="video" onclick="switchTab('video')">📹 Video</button>
-        <button data-tab="board" onclick="switchTab('board')">📝 Bảng trắng</button>
-        <button data-tab="chat" onclick="switchTab('chat')">💬 Trò chuyện</button>
+  <div class="waiting-room" id="waiting-room" style="display:none;">
+    <div class="card auth-card" style="max-width:420px; text-align:center;">
+      <h1 class="chalk">Sắp bắt đầu</h1>
+      <p class="sub">Buổi học sẽ bắt đầu lúc <strong id="waiting-start-time"></strong></p>
+      <div class="timer mono" id="waiting-countdown" style="font-size:28px; padding:10px 18px; display:inline-block; margin:14px 0;">00:00:00</div>
+      <p class="sub">Bạn đã vào phòng chờ — trang sẽ tự chuyển vào lớp khi tới giờ.</p>
+      <button class="btn btn-amber" id="waiting-start-now-btn" style="display:none; margin-top:10px;" onclick="forceStartNow()">Bắt đầu ngay</button>
+    </div>
+  </div>
+
+  <div class="stage-wrap" id="main-stage" style="display:none;">
+    <!-- Bảng đen full màn hình -->
+    <div class="board-full" id="board-full">
+      <div class="board-scroll" id="board-scroll">
+        <canvas id="board-canvas"></canvas>
+      </div>
+      <canvas id="deck-canvas"></canvas>
+
+      <div class="page-indicator" id="page-indicator">Trang 1/5</div>
+
+      <div class="board-hint" id="board-hint" style="display:none;">
+        Bạn chưa được cấp quyền thao tác trên bảng trắng. Giáo viên có thể cấp quyền cho bạn trong danh sách học viên.
       </div>
 
-      <div class="stage-body">
-        <div class="video-view active" id="video-view">
-          <div class="video-grid" id="video-grid">
-            <!-- các tile video (giáo viên, học viên, bản thân) được JS tạo động -->
-          </div>
-          <div class="video-empty" id="video-empty" style="display:none;">
-            Chưa có ai bật camera / chia sẻ màn hình.
-          </div>
-        </div>
-
-        <div class="board-view" id="board-view">
-          <canvas id="board-canvas"></canvas>
-          <div class="board-toolbar" id="board-toolbar">
-            <button class="tool-btn active" data-tool="pen" title="Bút vẽ" onclick="setBoardTool('pen')">✏️</button>
-            <button class="tool-btn" data-tool="text" title="Chèn chữ" onclick="setBoardTool('text')">🔤</button>
-            <span class="toolbar-sep"></span>
-            <span class="swatch selected" style="background:#F5F1E8" data-color="#F5F1E8"></span>
-            <span class="swatch" style="background:#E8B94A" data-color="#E8B94A"></span>
-            <span class="swatch" style="background:#7FBF8E" data-color="#7FBF8E"></span>
-            <span class="swatch" style="background:#E2664B" data-color="#E2664B"></span>
-            <span class="toolbar-sep"></span>
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('image-input').click()">🖼️ Ảnh</button>
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pdf-input').click()">📄 PDF</button>
-            <button class="btn btn-ghost btn-sm" id="clear-board-btn" onclick="clearBoard()">Xoá bảng</button>
-            <input type="file" id="image-input" accept="image/*" hidden onchange="onImageFileChosen(event)">
-            <input type="file" id="pdf-input" accept="application/pdf" hidden onchange="onPdfFileChosen(event)">
-          </div>
-          <div class="board-hint" id="board-hint" style="display:none;">
-            Bạn chưa được cấp quyền thao tác trên bảng trắng. Giáo viên có thể cấp quyền cho bạn trong danh sách bên phải.
-          </div>
-        </div>
-
-        <div class="chat-view" id="chat-view">
-          <div class="chat-messages" id="chat-messages"></div>
-          <form class="chat-input-row" id="chat-form">
-            <input type="text" id="chat-input" placeholder="Nhắn gì đó cho lớp..." autocomplete="off">
-            <button type="submit" class="btn btn-amber btn-sm">Gửi</button>
-          </form>
-        </div>
+      <div class="deck-controls" id="deck-controls" style="display:none;">
+        <button class="btn btn-ghost btn-sm" id="deck-prev-btn" onclick="deckPrevSlide()">◀ Trước</button>
+        <span class="who" id="deck-page-label"></span>
+        <button class="btn btn-ghost btn-sm" id="deck-next-btn" onclick="deckNextSlide()">Sau ▶</button>
+        <button class="btn btn-ghost btn-sm" id="deck-close-btn" onclick="closeDeck()">✕ Đóng slide</button>
       </div>
 
-      <div class="controls-bar">
-        <button class="btn btn-amber btn-sm" id="mic-btn" onclick="toggleMic()">🎤 Bật mic</button>
-        <button class="btn btn-amber btn-sm" id="cam-btn" onclick="toggleCam()">🎥 Bật camera</button>
-        <button class="btn btn-ghost btn-sm" id="share-btn" onclick="toggleScreenShare()" style="display:none;">🖥️ Chia sẻ màn hình</button>
-        <button class="btn btn-ghost btn-sm" id="hand-btn" onclick="toggleHandRaise()" style="display:none;">✋ Giơ tay</button>
-        <button class="btn btn-ghost btn-sm" id="muteall-btn" onclick="muteAllStudents()" style="display:none;">🔇 Tắt mic tất cả</button>
-        <button class="btn btn-ghost btn-sm" id="rec-btn" onclick="toggleRecording()">⏺ Ghi lại buổi học</button>
-        <button class="btn btn-ghost btn-sm" onclick="openSettingsModal()">⚙️ Âm thanh</button>
-        <div class="spacer"></div>
+      <div class="status-strip" id="status-strip">
         <span class="who" id="group-mesh-status"></span>
         <span class="who" id="scope-label"></span>
         <span class="who" id="rec-status"></span>
         <span class="who" id="student-status"></span>
+        <span class="who" id="deck-upload-status"></span>
       </div>
     </div>
 
-    <div class="sidebar">
-      <h4 class="chalk">Học viên</h4>
+    <!-- Camera nổi trên bảng, mặc định góc trái trên, kéo đi đâu tuỳ ý -->
+    <div class="video-overlay" id="video-grid"></div>
+
+    <!-- Thanh công cụ dọc bên phải -->
+    <div class="side-toolbar" id="side-toolbar">
+      <button class="tool-icon-btn" data-tool="select" title="Con trỏ — chọn, di chuyển, resize" onclick="setBoardTool('select')">🖱️</button>
+      <button class="tool-icon-btn active" data-tool="pen" title="Bút vẽ" onclick="setBoardTool('pen')">✏️</button>
+      <button class="tool-icon-btn" data-tool="text" title="Chèn chữ" onclick="setBoardTool('text')">🔤</button>
+      <div class="mini-swatch-row" id="board-toolbar">
+        <span class="swatch selected" style="background:#F5F1E8" data-color="#F5F1E8"></span>
+        <span class="swatch" style="background:#E8B94A" data-color="#E8B94A"></span>
+        <span class="swatch" style="background:#7FBF8E" data-color="#7FBF8E"></span>
+        <span class="swatch" style="background:#E2664B" data-color="#E2664B"></span>
+      </div>
+      <button class="tool-icon-btn" title="Chèn ảnh" onclick="document.getElementById('image-input').click()">🖼️</button>
+      <button class="tool-icon-btn" title="Trình chiếu PDF/PPT (cần xuất PPT ra PDF trước)" onclick="document.getElementById('pdf-input').click()">📽️</button>
+      <button class="tool-icon-btn" id="clear-page-btn" title="Xoá trang đang xem" onclick="clearCurrentPage()">🧹</button>
+      <button class="tool-icon-btn" id="clear-board-btn" title="Xoá cả bảng (mọi trang)" onclick="clearBoard()">🗑️</button>
+      <input type="file" id="image-input" accept="image/*" hidden onchange="onImageFileChosen(event)">
+      <input type="file" id="pdf-input" accept="application/pdf" hidden onchange="onPdfFileChosen(event)">
+
+      <div class="toolbar-divider"></div>
+
+      <button class="tool-icon-btn" id="mic-btn" title="Bật/tắt mic" onclick="toggleMic()">🎤</button>
+      <button class="tool-icon-btn" id="cam-btn" title="Bật/tắt camera" onclick="toggleCam()">🎥</button>
+      <button class="tool-icon-btn" id="share-btn" title="Chia sẻ màn hình" onclick="toggleScreenShare()" style="display:none;">🖥️</button>
+      <button class="tool-icon-btn" id="hand-btn" title="Giơ tay phát biểu" onclick="toggleHandRaise()" style="display:none;">✋</button>
+      <button class="tool-icon-btn" id="muteall-btn" title="Tắt mic tất cả" onclick="muteAllStudents()" style="display:none;">🔇</button>
+      <button class="tool-icon-btn" id="rec-btn" title="Ghi lại buổi học" onclick="toggleRecording()" style="display:none;">⏺</button>
+      <button class="tool-icon-btn" title="Cài đặt âm thanh" onclick="openSettingsModal()">⚙️</button>
+
+      <div class="toolbar-divider"></div>
+
+      <button class="tool-icon-btn" id="chat-toggle-btn" title="Trò chuyện" onclick="togglePanel('chat')">💬</button>
+      <button class="tool-icon-btn" id="members-toggle-btn" title="Học viên" onclick="togglePanel('members')">👥</button>
+
+      <div class="toolbar-divider" id="fun-tools-divider" style="display:none;"></div>
+      <button class="tool-icon-btn" id="dice-btn" title="Thả xúc xắc" onclick="rollDice()" style="display:none;">🎲</button>
+      <button class="tool-icon-btn" id="random-btn" title="Quay ngẫu nhiên tên học viên" onclick="pickRandomStudent()" style="display:none;">🎡</button>
+    </div>
+
+    <!-- Panel trượt ra: Trò chuyện -->
+    <div class="side-panel" id="chat-panel">
+      <div class="side-panel-header">
+        <h4 class="chalk">Trò chuyện</h4>
+        <button class="btn btn-ghost btn-sm" onclick="togglePanel('chat')">✕</button>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <form class="chat-input-row" id="chat-form">
+        <input type="text" id="chat-input" placeholder="Nhắn gì đó cho lớp..." autocomplete="off">
+        <button type="submit" class="btn btn-amber btn-sm">Gửi</button>
+      </form>
+    </div>
+
+    <!-- Panel trượt ra: Học viên + Nhóm nhỏ -->
+    <div class="side-panel" id="members-panel">
+      <div class="side-panel-header">
+        <h4 class="chalk">Học viên</h4>
+        <button class="btn btn-ghost btn-sm" onclick="togglePanel('members')">✕</button>
+      </div>
       <div class="member-list" id="member-list"></div>
 
       <div class="group-panel" id="group-panel" style="display:none;">
@@ -119,6 +152,11 @@
         <button class="btn btn-ghost btn-sm" id="test-mic-btn" onclick="testMic()">🔊 Nghe thử mic của bạn</button>
       </div>
       <div class="meter-track" id="mic-meter"></div>
+      <div class="settings-row" style="margin-top:10px;">
+        <span>🔈</span>
+        <input type="range" id="mic-volume" min="0" max="200" value="100" oninput="onMicVolumeChange(this.value)">
+        <span>🔊</span>
+      </div>
     </div>
 
     <div class="settings-section">

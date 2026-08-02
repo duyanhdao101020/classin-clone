@@ -15,10 +15,13 @@ const RTC_CONFIG = {
 
 const params = new URLSearchParams(window.location.search);
 const classId = params.get('classId');
+const sessionId = params.get('sessionId');
 
 let currentUser = null;   // {uid, name, role}
 let isTeacher = false;
 let classRef, liveRef, callsRef, membersRef, strokesRef;
+let sessionData = null;
+let waitingTimer = null;
 
 let localMediaStream = null;   // stream camera+mic của chính mình (tồn tại suốt phiên, bật/tắt qua track.enabled)
 let screenStream = null;        // chỉ tồn tại khi giáo viên đang chia sẻ màn hình
@@ -35,11 +38,15 @@ let recordedChunks = [];
 let drawingAllowed = false;
 let currentColor = '#F5F1E8';
 let boardTool = 'pen';
+let selection = null; // vật đang được chọn bằng công cụ con trỏ: { id, data, kind, dragging, resizing, ... }
 let drawing = false;
 let lastPoint = null;
 let strokeBuffer = [];
 let renderedStrokeIds = new Set();
 let imageCache = {};
+
+let activeDeck = null;     // {deckId, totalPages, currentPage, uid} — bài trình chiếu đang mở, dùng chung theo phạm vi bảng hiện tại
+let deckPageCache = {};    // "deckId:trang" -> Image
 
 let chatRef = null;
 let handRaised = false;
@@ -74,10 +81,22 @@ let audioCtxForMeter = null;
 let meterAnalyser = null;
 let meterRAF = null;
 
-if (!classId) {
-  alert('Thiếu classId trong đường dẫn.');
+let currentOutgoingAudioTrack = null; // track mic thường, hoặc track đã trộn với âm thanh máy khi chia sẻ màn hình có kèm âm thanh
+let screenShareMixCtx = null;
+let recordingVideoStream = null;      // luồng camera riêng độ phân giải cao, chỉ dùng để ghi hình cho nét
+let recordingMixCtx = null;           // AudioContext trộn âm thanh (mic giáo viên + mic mọi học viên) khi ghi hình
+
+let micAudioCtx = null;
+let micGainNode = null;
+let micGainedTrack = null;  // track mic đã qua GainNode — đây mới là track thật sự được gửi đi mọi nơi
+let micGainValue = 1;       // 0 - 2 (0% - 200%)
+
+if (!classId || !sessionId) {
+  alert('Thiếu thông tin buổi học trong đường dẫn. Vào lại từ trang lớp học của bạn.');
   window.location.href = 'index.html';
 }
+
+const SESSION_MAX_AGE_MS = 6 * 60 * 60 * 1000; // tự dọn buổi học sau 6 tiếng kể từ lúc mở
 
 auth.onAuthStateChanged(async (user) => {
   if (!user) { window.location.href = 'index.html'; return; }
@@ -92,11 +111,79 @@ auth.onAuthStateChanged(async (user) => {
   const cls = classDoc.data();
 
   isTeacher = currentUser.role === 'teacher' && cls.teacherId === currentUser.uid;
+  const backHref = isTeacher ? 'teacher.html' : 'student.html';
+
+  liveRef = classRef.collection('sessions').doc(sessionId);
+  const sessionSnap = await liveRef.get();
+  if (!sessionSnap.exists) {
+    alert('Buổi học này không tồn tại hoặc đã kết thúc.');
+    window.location.href = backHref;
+    return;
+  }
+  sessionData = sessionSnap.data();
+
+  const createdMs = sessionData.createdAt ? sessionData.createdAt.toMillis() : Date.now();
+  if (Date.now() - createdMs > SESSION_MAX_AGE_MS) {
+    await deleteSessionData(classId, sessionId);
+    if (isTeacher) await classRef.update({ activeSessionId: firebase.firestore.FieldValue.delete() }).catch(() => {});
+    alert('Buổi học đã quá 6 tiếng nên hệ thống tự dọn dẹp. Mở buổi học mới nhé.');
+    window.location.href = backHref;
+    return;
+  }
 
   document.getElementById('class-name').textContent = cls.name;
   document.getElementById('who').textContent = currentUser.name + (isTeacher ? ' (Giáo viên)' : '');
 
-  liveRef = classRef.collection('live').doc('current');
+  const scheduledMs = sessionData.scheduledStart ? sessionData.scheduledStart.toMillis() : createdMs;
+  sessionStartMs = scheduledMs;
+
+  if (Date.now() < scheduledMs) {
+    showWaitingRoom(scheduledMs);
+  } else {
+    await initClassroomFeatures();
+  }
+});
+
+function showWaitingRoom(scheduledMs){
+  document.getElementById('waiting-room').style.display = 'flex';
+  document.getElementById('main-stage').style.display = 'none';
+  document.getElementById('waiting-start-time').textContent = new Date(scheduledMs).toLocaleString('vi-VN');
+  if (isTeacher) document.getElementById('waiting-start-now-btn').style.display = 'inline-block';
+
+  function tick(){
+    const diff = scheduledMs - Date.now();
+    if (diff <= 0) {
+      clearInterval(waitingTimer);
+      enterFromWaitingRoom();
+      return;
+    }
+    const totalSec = Math.floor(diff / 1000);
+    const hh = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+    const ss = String(totalSec % 60).padStart(2, '0');
+    document.getElementById('waiting-countdown').textContent = `${hh}:${mm}:${ss}`;
+  }
+  tick();
+  waitingTimer = setInterval(tick, 1000);
+}
+
+async function forceStartNow(){
+  if (!isTeacher) return;
+  const now = firebase.firestore.Timestamp.now();
+  await liveRef.set({ scheduledStart: now, status: 'active' }, { merge: true });
+  sessionStartMs = now.toMillis();
+  clearInterval(waitingTimer);
+  enterFromWaitingRoom();
+}
+
+async function enterFromWaitingRoom(){
+  await initClassroomFeatures();
+}
+
+async function initClassroomFeatures(){
+  document.getElementById('waiting-room').style.display = 'none';
+  document.getElementById('main-stage').style.display = 'block';
+
   callsRef = liveRef.collection('calls');
   membersRef = classRef.collection('members');
   strokesRef = liveRef.collection('strokes');
@@ -104,13 +191,19 @@ auth.onAuthStateChanged(async (user) => {
 
   if (isTeacher) {
     if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
-      document.getElementById('share-btn').style.display = 'inline-block';
+      document.getElementById('share-btn').style.display = 'flex';
     } // trên điện thoại (đặc biệt iPhone/Safari) trình duyệt không hỗ trợ chia sẻ màn hình -> ẩn nút luôn, đỡ bấm vào bị lỗi
-    document.getElementById('muteall-btn').style.display = 'inline-block';
+    document.getElementById('muteall-btn').style.display = 'flex';
+    document.getElementById('rec-btn').style.display = 'flex'; // chỉ giáo viên được ghi hình
     document.getElementById('group-panel').style.display = 'block';
+    document.getElementById('fun-tools-divider').style.display = 'block';
+    document.getElementById('dice-btn').style.display = 'flex';
+    document.getElementById('random-btn').style.display = 'flex';
+    await liveRef.set({ status: 'active' }, { merge: true });
   } else {
     document.getElementById('clear-board-btn').style.display = 'none';
-    document.getElementById('hand-btn').style.display = 'inline-block';
+    document.getElementById('clear-page-btn').style.display = 'none';
+    document.getElementById('hand-btn').style.display = 'flex';
   }
 
   updateMicCamButtons();
@@ -133,7 +226,7 @@ auth.onAuthStateChanged(async (user) => {
   document.getElementById('room-info').textContent = isTeacher
     ? 'Bạn đang phát trực tiếp tới các học viên trong lớp.'
     : 'Đang kết nối tới giáo viên...';
-});
+}
 
 function startSessionTimer(){
   setInterval(() => {
@@ -144,14 +237,27 @@ function startSessionTimer(){
   }, 1000);
 }
 
-// ================= Tab chuyển đổi Video / Bảng trắng =================
-function switchTab(tab){
-  document.querySelectorAll('.stage-tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  document.getElementById('video-view').classList.toggle('active', tab === 'video');
-  document.getElementById('board-view').classList.toggle('active', tab === 'board');
-  document.getElementById('chat-view').classList.toggle('active', tab === 'chat');
-  updateBoardHint();
-  if (tab === 'chat') scrollChatToBottom();
+// ================= Panel trượt ra: Trò chuyện / Học viên =================
+function togglePanel(name){
+  const chatPanel = document.getElementById('chat-panel');
+  const membersPanel = document.getElementById('members-panel');
+  const chatBtn = document.getElementById('chat-toggle-btn');
+  const membersBtn = document.getElementById('members-toggle-btn');
+
+  if (name === 'chat') {
+    const opening = !chatPanel.classList.contains('open');
+    chatPanel.classList.toggle('open', opening);
+    membersPanel.classList.remove('open');
+    chatBtn.classList.toggle('active', opening);
+    membersBtn.classList.remove('active');
+    if (opening) scrollChatToBottom();
+  } else {
+    const opening = !membersPanel.classList.contains('open');
+    membersPanel.classList.toggle('open', opening);
+    chatPanel.classList.remove('open');
+    membersBtn.classList.toggle('active', opening);
+    chatBtn.classList.remove('active');
+  }
 }
 function scrollChatToBottom(){
   const box = document.getElementById('chat-messages');
@@ -165,40 +271,40 @@ function ensureTile(id, label, isSelf){
   let tile = document.getElementById('tile-' + id);
   if (!tile) {
     tile = document.createElement('div');
-    tile.className = 'video-tile' + (id !== 'self' && !isSelf ? ' main-tile' : '');
+    tile.className = 'video-tile';
     tile.id = 'tile-' + id;
     tile.innerHTML = `
       <video autoplay playsinline ${isSelf ? 'muted' : ''}></video>
       <div class="avatar-fallback"></div>
       <div class="label"><span class="mic-indicator">🔇</span><span class="name-text"></span></div>
+      <div class="resize-handle" title="Kéo để phóng to/thu nhỏ"></div>
     `;
     document.getElementById('video-grid').appendChild(tile);
     placeTileDefault(tile, id);
     makeTileDraggable(tile);
+    makeTileResizable(tile);
     if (!isSelf) registerPlaybackEl(tile.querySelector('video'));
   }
   tile.querySelector('.name-text').textContent = label;
   tile.querySelector('.avatar-fallback').textContent = (label || '?').trim().charAt(0).toUpperCase();
-  updateVideoEmptyVisibility();
   return tile;
 }
 
+// mặc định xếp gọn ở góc trái trên, nhỏ như camera ClassIn, không che bảng
 function placeTileDefault(tile, id){
   const grid = document.getElementById('video-grid');
   const containerWidth = grid.clientWidth || 300;
-  const gap = 16;
-  const isMain = tile.classList.contains('main-tile');
-  const baseWidth = isMain ? 360 : 230;
-  const tileWidth = Math.min(baseWidth, Math.max(140, containerWidth - 32)); // co lại vừa màn hình hẹp, không tràn ra ngoài
+  const gap = 10;
+  const tileWidth = Math.min(200, Math.max(130, containerWidth * 0.36));
   tile.style.width = tileWidth + 'px';
-  const tileHeight = tileWidth * 9 / 16 + 34; // ước lượng thêm phần nhãn tên/mic
+  const tileHeight = tileWidth * 9 / 16 + 26; // ước lượng thêm phần nhãn tên/mic
 
-  const cols = Math.max(1, Math.floor((containerWidth + gap) / (tileWidth + gap)));
+  const cols = Math.max(1, Math.floor((containerWidth - 20 + gap) / (tileWidth + gap)));
   const idx = Object.keys(tilePositions).length;
   const col = idx % cols;
   const row = Math.floor(idx / cols);
-  const x = 16 + col * (tileWidth + gap);
-  const y = 16 + row * (tileHeight + gap);
+  const x = 14 + col * (tileWidth + gap);
+  const y = 14 + row * (tileHeight + gap);
   tile.style.left = x + 'px';
   tile.style.top = y + 'px';
   tilePositions[id] = { x, y };
@@ -244,15 +350,44 @@ function makeTileDraggable(tile){
   window.addEventListener('touchmove', pointerMove, { passive: false });
   window.addEventListener('touchend', pointerUp);
 }
+
+// kéo góc dưới-phải để phóng to/thu nhỏ khung camera (không đồng bộ cho người khác, chỉ ảnh hưởng màn hình của mình)
+function makeTileResizable(tile){
+  const handle = tile.querySelector('.resize-handle');
+  if (!handle) return;
+  let resizing = false;
+  let startX = 0, startWidth = 0;
+  const MIN_W = 130, MAX_W = 520;
+
+  function pointerDown(e){
+    resizing = true;
+    tile.style.zIndex = ++tileZCounter;
+    const p = e.touches ? e.touches[0] : e;
+    startX = p.clientX;
+    startWidth = tile.offsetWidth;
+    e.preventDefault();
+    e.stopPropagation(); // đừng để trigger kéo-di-chuyển của tile cùng lúc
+  }
+  function pointerMove(e){
+    if (!resizing) return;
+    const p = e.touches ? e.touches[0] : e;
+    const newWidth = Math.min(MAX_W, Math.max(MIN_W, startWidth + (p.clientX - startX)));
+    tile.style.width = newWidth + 'px';
+  }
+  function pointerUp(){ resizing = false; }
+
+  handle.addEventListener('mousedown', pointerDown);
+  window.addEventListener('mousemove', pointerMove);
+  window.addEventListener('mouseup', pointerUp);
+  handle.addEventListener('touchstart', pointerDown, { passive: false });
+  window.addEventListener('touchmove', pointerMove, { passive: false });
+  window.addEventListener('touchend', pointerUp);
+}
+
 function removeTile(id){
   const tile = document.getElementById('tile-' + id);
   if (tile) tile.remove();
   delete tilePositions[id];
-  updateVideoEmptyVisibility();
-}
-function updateVideoEmptyVisibility(){
-  const grid = document.getElementById('video-grid');
-  document.getElementById('video-empty').style.display = grid.children.length ? 'none' : 'block';
 }
 function updateTileTrackState(id){
   const tile = document.getElementById('tile-' + id);
@@ -296,10 +431,13 @@ const MIC_CONSTRAINTS = {
 async function ensureLocalMedia(){
   try {
     localMediaStream = await navigator.mediaDevices.getUserMedia({ video: CAM_CONSTRAINTS, audio: MIC_CONSTRAINTS });
-    localMediaStream.getAudioTracks().forEach(t => t.enabled = false);
     localMediaStream.getVideoTracks().forEach(t => t.enabled = false);
-    const audioTrack = localMediaStream.getAudioTracks()[0];
-    if (audioTrack) currentMicDeviceId = audioTrack.getSettings().deviceId || '';
+    const rawAudioTrack = localMediaStream.getAudioTracks()[0];
+    if (rawAudioTrack) {
+      rawAudioTrack.enabled = true; // track thô luôn bật — mute thật sự nằm ở track đã qua gain bên dưới
+      currentMicDeviceId = rawAudioTrack.getSettings().deviceId || '';
+      currentOutgoingAudioTrack = buildMicGainChain(rawAudioTrack);
+    }
     renderSelfTile();
     return true;
   } catch (e) {
@@ -308,12 +446,30 @@ async function ensureLocalMedia(){
   }
 }
 
+// Đưa mic đi qua 1 GainNode để có thể chỉnh âm lượng gửi đi (thanh trượt trong Cài đặt âm thanh),
+// áp dụng cho MỌI nơi mic được gửi: cuộc gọi chính, thoại nhóm, trộn khi chia sẻ màn hình, ghi hình.
+function buildMicGainChain(rawTrack){
+  micAudioCtx = micAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const src = micAudioCtx.createMediaStreamSource(new MediaStream([rawTrack]));
+  micGainNode = micAudioCtx.createGain();
+  micGainNode.gain.value = micGainValue;
+  const dest = micAudioCtx.createMediaStreamDestination();
+  src.connect(micGainNode).connect(dest);
+  micGainedTrack = dest.stream.getAudioTracks()[0];
+  micGainedTrack.enabled = micOn;
+  return micGainedTrack;
+}
+
+function onMicVolumeChange(value){
+  micGainValue = value / 100;
+  if (micGainNode) micGainNode.gain.value = micGainValue;
+}
+
 function toggleMic(){
-  if (!localMediaStream) { alert('Chưa có quyền truy cập micro. Hãy cấp quyền camera/micro cho trang này rồi tải lại trang.'); return; }
+  if (!localMediaStream || !micGainedTrack) { alert('Chưa có quyền truy cập micro. Hãy cấp quyền camera/micro cho trang này rồi tải lại trang.'); return; }
   if (forcedMuted) { alert('Giáo viên đã tắt mic của cả lớp. Vui lòng đợi giáo viên mở lại.'); return; }
   micOn = !micOn;
-  const t = localMediaStream.getAudioTracks()[0];
-  if (t) t.enabled = micOn;
+  micGainedTrack.enabled = micOn;
   updateMicCamButtons();
   updateSelfTileVisual();
 }
@@ -331,16 +487,18 @@ function toggleCam(){
 function updateMicCamButtons(){
   const micBtn = document.getElementById('mic-btn');
   const camBtn = document.getElementById('cam-btn');
-  micBtn.textContent = micOn ? '🎤 Tắt mic' : '🎤 Bật mic';
-  micBtn.classList.toggle('off', !micOn);
-  camBtn.textContent = camOn ? '🎥 Tắt camera' : '🎥 Bật camera';
-  camBtn.classList.toggle('off', !camOn);
+  micBtn.textContent = micOn ? '🎤' : '🔇';
+  micBtn.classList.toggle('on', micOn);
+  micBtn.title = micOn ? 'Tắt mic' : 'Bật mic';
+  camBtn.textContent = '🎥';
+  camBtn.classList.toggle('on', camOn);
+  camBtn.title = camOn ? 'Tắt camera' : 'Bật camera';
 }
 
 // gắn track hiện tại (mic + camera, hoặc mic + màn hình nếu đang chia sẻ) vào 1 peer connection mới
 function addLocalTracksToPC(pc){
   if (!localMediaStream) return;
-  const audioTrack = localMediaStream.getAudioTracks()[0];
+  const audioTrack = currentOutgoingAudioTrack || localMediaStream.getAudioTracks()[0];
   const videoTrack = (sharingScreen && screenStream) ? screenStream.getVideoTracks()[0] : localMediaStream.getVideoTracks()[0];
   if (audioTrack) pc.addTrack(audioTrack, localMediaStream);
   if (videoTrack) pc.addTrack(videoTrack, sharingScreen ? screenStream : localMediaStream);
@@ -379,11 +537,14 @@ function onMusicModeToggle(){
 }
 
 // đổi track mic đang phát trực tiếp (kênh chính + mọi kết nối thoại nhóm), không cần đàm phán lại kết nối
-function replaceLiveAudioTrack(newTrack){
-  newTrack.enabled = micOn;
+function replaceLiveAudioTrack(newRawTrack){
+  newRawTrack.enabled = true; // track thô luôn bật — mute/âm lượng thật sự nằm ở track đã qua gain
   const oldTrack = localMediaStream.getAudioTracks()[0];
   if (oldTrack) { localMediaStream.removeTrack(oldTrack); oldTrack.stop(); }
-  localMediaStream.addTrack(newTrack);
+  localMediaStream.addTrack(newRawTrack);
+
+  const gainedTrack = buildMicGainChain(newRawTrack);
+  if (!screenShareMixCtx) currentOutgoingAudioTrack = gainedTrack; // nếu đang trộn âm thanh màn hình thì giữ nguyên track đã trộn
 
   const allPCs = [
     ...Object.values(teacherPCs),
@@ -392,7 +553,7 @@ function replaceLiveAudioTrack(newTrack){
   ];
   allPCs.forEach(pc => {
     const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
-    if (sender) sender.replaceTrack(newTrack);
+    if (sender) sender.replaceTrack(currentOutgoingAudioTrack || gainedTrack);
   });
 }
 
@@ -563,19 +724,43 @@ document.getElementById('settings-modal').addEventListener('click', (e) => {
 });
 
 // ================= Chia sẻ màn hình (chỉ giáo viên) — thay track video hiện có, không cần đàm phán lại =================
+function mixTracksToOne(tracks){
+  screenShareMixCtx = screenShareMixCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const dest = screenShareMixCtx.createMediaStreamDestination();
+  tracks.filter(Boolean).forEach(t => {
+    try { screenShareMixCtx.createMediaStreamSource(new MediaStream([t])).connect(dest); } catch (e) {}
+  });
+  return dest.stream.getAudioTracks()[0];
+}
+
 async function toggleScreenShare(){
   if (sharingScreen) { stopScreenShare(); return; }
+  const wantAudio = confirm(
+    'Chia sẻ màn hình:\n\nCó muốn chia luôn ÂM THANH máy tính (nhạc, video đang phát...) không?\n\n' +
+    'OK = Có, chia cả âm thanh máy tính (mic của bạn vẫn nghe song song)\nHuỷ = Không, chỉ chia hình ảnh'
+  );
   try {
-    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: wantAudio });
     sharingScreen = true;
-    const newTrack = screenStream.getVideoTracks()[0];
-    for (const uid in teacherPCs) {
-      const sender = teacherPCs[uid].getSenders().find(s => s.track && s.track.kind === 'video');
-      if (sender) await sender.replaceTrack(newTrack);
-      else teacherPCs[uid].addTrack(newTrack, screenStream);
+    const newVideoTrack = screenStream.getVideoTracks()[0];
+    const screenAudioTrack = screenStream.getAudioTracks()[0]; // có thể không có, tuỳ trình duyệt/nguồn được chọn
+
+    if (screenAudioTrack) {
+      currentOutgoingAudioTrack = mixTracksToOne([micGainedTrack, screenAudioTrack]);
     }
-    newTrack.onended = () => stopScreenShare();
-    document.getElementById('share-btn').textContent = '🖥️ Dừng chia sẻ';
+
+    for (const uid in teacherPCs) {
+      const videoSender = teacherPCs[uid].getSenders().find(s => s.track && s.track.kind === 'video');
+      if (videoSender) await videoSender.replaceTrack(newVideoTrack);
+      else teacherPCs[uid].addTrack(newVideoTrack, screenStream);
+
+      if (screenAudioTrack) {
+        const audioSender = teacherPCs[uid].getSenders().find(s => s.track && s.track.kind === 'audio');
+        if (audioSender) await audioSender.replaceTrack(currentOutgoingAudioTrack);
+      }
+    }
+    newVideoTrack.onended = () => stopScreenShare(); // người dùng bấm nút "Dừng chia sẻ" của trình duyệt
+    document.getElementById('share-btn').classList.add('on');
   } catch (e) {
     // người dùng huỷ hộp thoại chọn màn hình -> bỏ qua
   }
@@ -585,12 +770,18 @@ async function stopScreenShare(){
   if (!sharingScreen) return;
   sharingScreen = false;
   const cameraTrack = localMediaStream ? localMediaStream.getVideoTracks()[0] : null;
+  const micTrack = micGainedTrack;
+  currentOutgoingAudioTrack = micTrack;
+
   for (const uid in teacherPCs) {
-    const sender = teacherPCs[uid].getSenders().find(s => s.track && s.track.kind === 'video');
-    if (sender && cameraTrack) await sender.replaceTrack(cameraTrack);
+    const videoSender = teacherPCs[uid].getSenders().find(s => s.track && s.track.kind === 'video');
+    if (videoSender && cameraTrack) await videoSender.replaceTrack(cameraTrack);
+    const audioSender = teacherPCs[uid].getSenders().find(s => s.track && s.track.kind === 'audio');
+    if (audioSender && micTrack) await audioSender.replaceTrack(micTrack);
   }
   if (screenStream) { screenStream.getTracks().forEach(t => t.stop()); screenStream = null; }
-  document.getElementById('share-btn').textContent = '🖥️ Chia sẻ màn hình';
+  if (screenShareMixCtx) { try { screenShareMixCtx.close(); } catch (e) {} screenShareMixCtx = null; }
+  document.getElementById('share-btn').classList.remove('on');
 }
 
 // ================= GIÁO VIÊN: lắng nghe học viên vào phòng, tạo offer =================
@@ -703,53 +894,185 @@ async function joinAsStudent(){
 
 // ================= Rời phòng =================
 async function leaveRoom(){
+  if (isTeacher) {
+    const choice = await askEndOrLeave();
+    if (choice === 'cancel') return;
+    await teardownMedia();
+    if (choice === 'end') {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        await new Promise((resolve) => { mediaRecorder.addEventListener('stop', resolve, { once: true }); mediaRecorder.stop(); });
+      }
+      await deleteSessionData(classId, sessionId);
+      await classRef.update({ activeSessionId: firebase.firestore.FieldValue.delete() }).catch(() => {});
+    }
+    window.location.href = 'teacher.html';
+    return;
+  }
+
+  await teardownMedia();
+  if (currentUser && callsRef) {
+    try { await callsRef.doc(currentUser.uid).delete(); } catch (e) {}
+  }
+  window.location.href = 'student.html';
+}
+
+async function teardownMedia(){
   if (localMediaStream) localMediaStream.getTracks().forEach(t => t.stop());
   if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+  if (screenShareMixCtx) { try { screenShareMixCtx.close(); } catch (e) {} }
+  if (micAudioCtx) { try { micAudioCtx.close(); } catch (e) {} }
   stopTestStream();
   stopMicMeter();
   if (studentPC) studentPC.close();
   for (const uid in teacherPCs) teacherPCs[uid].close();
   await leaveGroupAudioMesh();
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-  if (!isTeacher && currentUser && callsRef) {
-    try { await callsRef.doc(currentUser.uid).delete(); } catch (e) {}
-  }
-  window.location.href = isTeacher ? 'teacher.html' : 'student.html';
+  cleanupRecordingStream();
 }
+
 window.addEventListener('beforeunload', () => {
   if (!isTeacher && currentUser && callsRef) callsRef.doc(currentUser.uid).delete().catch(() => {});
   if (myGroupPresenceRef) myGroupPresenceRef.delete().catch(() => {});
 });
 
-// ================= Ghi hình (MediaRecorder, tải về máy) =================
-function getRecordableStream(){
-  if (isTeacher) {
-    const tracks = [];
-    const videoTrack = (sharingScreen && screenStream) ? screenStream.getVideoTracks()[0] : (localMediaStream && localMediaStream.getVideoTracks()[0]);
-    const audioTrack = localMediaStream && localMediaStream.getAudioTracks()[0];
-    if (videoTrack) tracks.push(videoTrack);
-    if (audioTrack) tracks.push(audioTrack);
-    return tracks.length ? new MediaStream(tracks) : null;
-  }
-  const tile = document.getElementById('tile-teacher');
-  return tile ? tile.querySelector('video').srcObject : null;
+// Hộp thoại nhỏ: giáo viên chọn "Kết thúc buổi học" (xoá sạch dữ liệu buổi) / "Chỉ rời" (buổi vẫn còn) / "Huỷ"
+function askEndOrLeave(){
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal-box" style="max-width:380px;">
+        <div class="modal-header"><h3 class="chalk">Rời phòng học</h3></div>
+        <p class="sub" style="margin:4px 0 18px;">Bạn muốn kết thúc buổi học luôn (xoá toàn bộ bảng/chat/dữ liệu buổi này), hay chỉ rời và giữ buổi học để vào lại sau?</p>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <button class="btn btn-danger" id="end-choice-btn" style="width:100%;">Kết thúc buổi học (xoá dữ liệu)</button>
+          <button class="btn btn-amber" id="leave-choice-btn" style="width:100%;">Chỉ rời (giữ buổi học)</button>
+          <button class="btn btn-ghost" id="cancel-choice-btn" style="width:100%;">Huỷ, ở lại phòng</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const cleanup = (val) => { overlay.remove(); resolve(val); };
+    overlay.querySelector('#end-choice-btn').onclick = () => cleanup('end');
+    overlay.querySelector('#leave-choice-btn').onclick = () => cleanup('leave');
+    overlay.querySelector('#cancel-choice-btn').onclick = () => cleanup('cancel');
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup('cancel'); });
+  });
 }
 
-function toggleRecording(){
+// Xoá toàn bộ dữ liệu của 1 buổi học (bảng, chat, nhóm, tín hiệu gọi, slide...) — dùng khi kết thúc buổi hoặc buổi quá hạn 6 tiếng
+async function deleteSessionData(cId, sId){
+  const sessionRef = db.collection('classes').doc(cId).collection('sessions').doc(sId);
+
+  async function wipeCollection(colRef){
+    const snap = await colRef.get();
+    if (snap.empty) return;
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+    return snap.docs;
+  }
+
+  try {
+    await wipeCollection(sessionRef.collection('calls'));
+
+    const strokeDocs = await sessionRef.collection('strokes').get();
+    for (const d of strokeDocs.docs) {
+      if (d.id === '__deck__') await wipeCollection(d.ref.collection('pages'));
+    }
+    await wipeCollection(sessionRef.collection('strokes'));
+    await wipeCollection(sessionRef.collection('chat'));
+
+    const groupsSnap = await sessionRef.collection('groups').get();
+    for (const g of groupsSnap.docs) {
+      await wipeCollection(g.ref.collection('presence'));
+      await wipeCollection(g.ref.collection('strokes'));
+      await wipeCollection(g.ref.collection('chat'));
+      await wipeCollection(g.ref.collection('calls'));
+      await g.ref.delete();
+    }
+
+    await sessionRef.delete();
+  } catch (e) {
+    console.warn('Dọn dữ liệu buổi học chưa xong hết:', e);
+  }
+}
+
+// ================= Ghi hình (MediaRecorder, tải về máy) =================
+// ================= Ghi hình (chỉ giáo viên) — video riêng độ phân giải cao + âm thanh trộn cả lớp =================
+function pickRecorderMimeType(){
+  const candidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  for (const c of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c;
+  }
+  return '';
+}
+
+async function getRecordingStream(){
+  // Ghi lại TOÀN BỘ những gì hiển thị (bảng, mọi camera, kể cả nội dung đang chia sẻ màn hình nếu có) —
+  // dùng đúng cơ chế "ghi màn hình" của trình duyệt thay vì chỉ ghi riêng camera.
+  let videoTrack = null;
+  try {
+    recordingVideoStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 30 } },
+      audio: false,
+      preferCurrentTab: true,     // gợi ý Chrome chọn sẵn "Tab này" cho tiện — trình duyệt không hỗ trợ sẽ tự bỏ qua
+      selfBrowserSurface: 'include'
+    });
+    videoTrack = recordingVideoStream.getVideoTracks()[0];
+    videoTrack.onended = () => { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); };
+  } catch (e) {
+    return null; // người dùng huỷ hộp thoại chọn màn hình để ghi
+  }
+
+  // Âm thanh: trộn mic của giáo viên + âm thanh của TẤT CẢ học viên đang kết nối (không chỉ riêng giáo viên)
+  recordingMixCtx = recordingMixCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const dest = recordingMixCtx.createMediaStreamDestination();
+  const micTrack = micGainedTrack;
+  if (micTrack) {
+    try { recordingMixCtx.createMediaStreamSource(new MediaStream([micTrack])).connect(dest); } catch (e) {}
+  }
+  Object.values(teacherPCs).forEach(pc => {
+    pc.getReceivers().forEach(r => {
+      if (r.track && r.track.kind === 'audio') {
+        try { recordingMixCtx.createMediaStreamSource(new MediaStream([r.track])).connect(dest); } catch (e) {}
+      }
+    });
+  });
+
+  const tracks = [];
+  if (videoTrack) tracks.push(videoTrack);
+  dest.stream.getAudioTracks().forEach(t => tracks.push(t));
+  return tracks.length ? new MediaStream(tracks) : null;
+}
+
+function cleanupRecordingStream(){
+  if (recordingVideoStream) { recordingVideoStream.getTracks().forEach(t => t.stop()); recordingVideoStream = null; }
+  if (recordingMixCtx) { try { recordingMixCtx.close(); } catch (e) {} recordingMixCtx = null; }
+}
+
+async function toggleRecording(){
+  if (!isTeacher) return; // chỉ giáo viên được ghi hình
   const recBtn = document.getElementById('rec-btn');
   if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    recBtn.textContent = '⏺ Ghi lại buổi học';
-    document.getElementById('rec-status').textContent = '';
+    mediaRecorder.stop(); // phần dọn dẹp + tải file thực hiện trong onstop
     return;
   }
-  const streamToRecord = getRecordableStream();
+
+  recBtn.disabled = true;
+  const streamToRecord = await getRecordingStream();
+  recBtn.disabled = false;
   if (!streamToRecord || streamToRecord.getTracks().length === 0) {
-    alert('Chưa có hình ảnh/âm thanh để ghi. Bật camera/mic, hoặc đợi giáo viên phát trực tiếp.');
-    return;
+    cleanupRecordingStream();
+    return; // người dùng huỷ hộp thoại chọn màn hình để ghi, không cần báo lỗi thêm
   }
+
   recordedChunks = [];
-  mediaRecorder = new MediaRecorder(streamToRecord, { mimeType: 'video/webm' });
+  const mimeType = pickRecorderMimeType();
+  mediaRecorder = new MediaRecorder(streamToRecord, Object.assign(
+    mimeType ? { mimeType } : {},
+    { videoBitsPerSecond: 3000000 }
+  ));
   mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
   mediaRecorder.onstop = () => {
     const blob = new Blob(recordedChunks, { type: 'video/webm' });
@@ -759,36 +1082,118 @@ function toggleRecording(){
     a.download = `buoihoc-${Date.now()}.webm`;
     a.click();
     URL.revokeObjectURL(url);
+    cleanupRecordingStream();
+    recBtn.classList.remove('recording');
+    document.getElementById('rec-status').textContent = '';
   };
   mediaRecorder.start();
-  recBtn.textContent = '⏹ Dừng ghi hình';
-  document.getElementById('rec-status').innerHTML = '<span class="rec-dot"></span>Đang ghi...';
+  recBtn.classList.add('recording');
+  document.getElementById('rec-status').innerHTML = '<span class="rec-dot"></span>Đang ghi (toàn màn hình + âm thanh cả lớp)...';
 }
 
 // ================= Bảng trắng đồng bộ (Firestore) =================
 function setBoardTool(tool){
   boardTool = tool;
-  document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  document.querySelectorAll('.tool-icon-btn[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  if (tool !== 'select') { selection = null; if (window._redrawAll) window._redrawAll(); }
+}
+
+// ===== Công cụ con trỏ: dò trúng vật thể, tay cầm resize, khung highlight =====
+function hitTestObjects(pos, canvas){
+  const list = window._allObjects || [];
+  for (let i = list.length - 1; i >= 0; i--) { // ưu tiên vật vẽ sau cùng (nằm trên) trước
+    const { id, data } = list[i];
+    if (data.type === 'image') {
+      if (pos.x >= data.x && pos.x <= data.x + data.w && pos.y >= data.y && pos.y <= data.y + data.h) {
+        return { id, data, kind: 'image' };
+      }
+    } else if (data.type === 'text') {
+      const approxCharW = (data.fontSize || 22) * 0.55 / canvas.width;
+      const approxH = (data.fontSize || 22) * 1.3 / canvas.height;
+      const textW = (data.text || '').length * approxCharW;
+      if (pos.x >= data.x - 0.005 && pos.x <= data.x + textW + 0.005 && pos.y >= data.y - 0.005 && pos.y <= data.y + approxH) {
+        return { id, data, kind: 'text' };
+      }
+    } else if (data.points && data.points.length > 1) {
+      const threshold = 0.012;
+      for (let j = 1; j < data.points.length; j++) {
+        if (distToSegment(pos, data.points[j - 1], data.points[j]) < threshold) {
+          return { id, data, kind: 'stroke' };
+        }
+      }
+    }
+  }
+  return null;
+}
+function distToSegment(p, a, b){
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq === 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const cx = a.x + t * dx, cy = a.y + t * dy;
+  return Math.hypot(p.x - cx, p.y - cy);
+}
+function isOnResizeHandle(pos, data, canvas){
+  const hx = data.x + data.w, hy = data.y + data.h;
+  const rx = 14 / canvas.width, ry = 14 / canvas.height; // vùng bấm ~14px quy đổi ra toạ độ chuẩn hoá
+  return Math.abs(pos.x - hx) < rx && Math.abs(pos.y - hy) < ry;
+}
+function drawSelectionOverlay(ctx, canvas){
+  if (!selection || boardTool !== 'select') return;
+  const d = selection.data;
+  ctx.save();
+  ctx.strokeStyle = '#E8B94A';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  if (d.type === 'image') {
+    ctx.strokeRect(d.x * canvas.width, d.y * canvas.height, d.w * canvas.width, d.h * canvas.height);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#E8B94A';
+    ctx.fillRect((d.x + d.w) * canvas.width - 6, (d.y + d.h) * canvas.height - 6, 12, 12);
+  } else if (d.type === 'text') {
+    const approxCharW = (d.fontSize || 22) * 0.55 / canvas.width;
+    const approxH = (d.fontSize || 22) * 1.3 / canvas.height;
+    const textW = (d.text || '').length * approxCharW;
+    ctx.strokeRect(d.x * canvas.width - 4, d.y * canvas.height - 4, textW * canvas.width + 8, approxH * canvas.height + 8);
+  } else if (d.points && d.points.length) {
+    const xs = d.points.map(p => p.x), ys = d.points.map(p => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    ctx.strokeRect(minX * canvas.width - 6, minY * canvas.height - 6, (maxX - minX) * canvas.width + 12, (maxY - minY) * canvas.height + 12);
+  }
+  ctx.restore();
 }
 
 function updateBoardHint(){
   const hint = document.getElementById('board-hint');
-  const boardActive = document.getElementById('board-view').classList.contains('active');
-  hint.style.display = (boardActive && !canDraw()) ? 'block' : 'none';
+  hint.style.display = canDraw() ? 'none' : 'block';
 }
+
+const PAGES_COUNT = 5;
 
 function setupBoard(){
   const canvas = document.getElementById('board-canvas');
   const ctx = canvas.getContext('2d');
+  const deckCanvas = document.getElementById('deck-canvas');
+  const deckCtx = deckCanvas.getContext('2d');
+  const scrollEl = document.getElementById('board-scroll');
 
   function resize(){
-    const rect = canvas.parentElement.getBoundingClientRect();
+    const rect = scrollEl.getBoundingClientRect(); // kích thước 1 khung nhìn (1 "trang")
     canvas.width = rect.width;
-    canvas.height = rect.height;
+    canvas.height = rect.height * PAGES_COUNT;
+    deckCanvas.width = rect.width;
+    deckCanvas.height = rect.height;
     redrawAll();
+    redrawDeck();
   }
   window.addEventListener('resize', resize);
   resize();
+
+  scrollEl.addEventListener('scroll', () => {
+    const pageH = scrollEl.clientHeight;
+    const page = Math.min(PAGES_COUNT, Math.round(scrollEl.scrollTop / pageH) + 1);
+    document.getElementById('page-indicator').textContent = `Trang ${page}/${PAGES_COUNT}`;
+  });
 
   document.querySelectorAll('.swatch').forEach(sw => {
     sw.addEventListener('click', () => {
@@ -806,19 +1211,71 @@ function setupBoard(){
 
   function start(e){
     if (!canDraw()) return;
-    if (boardTool === 'text') { openTextInput(getPos(e)); return; }
+    const pos = getPos(e);
+    if (boardTool === 'select') {
+      if (selection && selection.kind === 'image' && isOnResizeHandle(pos, selection.data, canvas)) {
+        selection.resizing = true;
+        selection.startPos = pos;
+        selection.origW = selection.data.w;
+        selection.origH = selection.data.h;
+        return;
+      }
+      const hit = hitTestObjects(pos, canvas);
+      selection = hit ? Object.assign(hit, {
+        dragging: true,
+        startPos: pos,
+        origX: hit.data.x,
+        origY: hit.data.y,
+        origPoints: hit.data.points ? hit.data.points.map(p => ({ x: p.x, y: p.y })) : null
+      }) : null;
+      if (window._redrawAll) window._redrawAll();
+      return;
+    }
+    if (boardTool === 'text') { openTextInput(pos); return; }
     drawing = true;
-    lastPoint = getPos(e);
+    lastPoint = pos;
     strokeBuffer = [lastPoint];
   }
   function move(e){
+    const pos = getPos(e);
+    if (boardTool === 'select' && selection) {
+      if (selection.resizing) {
+        const dx = pos.x - selection.startPos.x;
+        selection.data.w = Math.max(0.03, selection.origW + dx);
+        selection.data.h = Math.max(0.02, selection.origH + dx * (selection.origH / selection.origW));
+        if (window._redrawAll) window._redrawAll();
+        return;
+      }
+      if (selection.dragging) {
+        const dx = pos.x - selection.startPos.x;
+        const dy = pos.y - selection.startPos.y;
+        if (selection.origPoints) {
+          selection.data.points = selection.origPoints.map(p => ({ x: p.x + dx, y: p.y + dy }));
+        } else {
+          selection.data.x = selection.origX + dx;
+          selection.data.y = selection.origY + dy;
+        }
+        if (window._redrawAll) window._redrawAll();
+        return;
+      }
+    }
     if (!drawing || boardTool !== 'pen' || !canDraw()) return;
-    const p = getPos(e);
-    drawLineNormalized(ctx, canvas, lastPoint, p, currentColor);
-    strokeBuffer.push(p);
-    lastPoint = p;
+    drawLineNormalized(ctx, canvas, lastPoint, pos, currentColor);
+    strokeBuffer.push(pos);
+    lastPoint = pos;
   }
   function end(){
+    if (boardTool === 'select' && selection && (selection.dragging || selection.resizing)) {
+      const updates = selection.resizing
+        ? { w: selection.data.w, h: selection.data.h }
+        : selection.origPoints
+          ? { points: selection.data.points }
+          : { x: selection.data.x, y: selection.data.y };
+      strokesRef.doc(selection.id).update(updates).catch(() => {});
+      selection.dragging = false;
+      selection.resizing = false;
+      return;
+    }
     if (!drawing) return;
     drawing = false;
     if (strokeBuffer.length > 1) {
@@ -836,12 +1293,23 @@ function setupBoard(){
   canvas.addEventListener('mousedown', start);
   canvas.addEventListener('mousemove', move);
   window.addEventListener('mouseup', end);
-  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); start(e); });
-  canvas.addEventListener('touchmove', (e) => { e.preventDefault(); move(e); });
+  canvas.addEventListener('touchstart', (e) => {
+    // Bút/chữ: luôn vẽ bằng 1 ngón (không cuộn). Con trỏ: chỉ chặn cuộn khi thật sự chạm trúng 1 vật để kéo.
+    if (boardTool === 'pen' || boardTool === 'text') { e.preventDefault(); start(e); return; }
+    if (boardTool === 'select') {
+      const pos = getPos(e);
+      const willGrab = (selection && selection.kind === 'image' && isOnResizeHandle(pos, selection.data, canvas)) || hitTestObjects(pos, canvas);
+      if (willGrab) e.preventDefault();
+    }
+    start(e);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', (e) => {
+    if (drawing || (selection && (selection.dragging || selection.resizing))) e.preventDefault();
+    move(e);
+  }, { passive: false });
   canvas.addEventListener('touchend', end);
 
   window.addEventListener('paste', (e) => {
-    if (!document.getElementById('board-view').classList.contains('active')) return;
     if (!canDraw()) return;
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
@@ -864,7 +1332,7 @@ function setupBoard(){
     input.style.top = (rect.top - parentRect.top + pos.y * rect.height - 12) + 'px';
     input.style.color = currentColor;
     canvas.parentElement.appendChild(input);
-    input.focus();
+    setTimeout(() => input.focus(), 0); // tránh tranh chấp focus ngay trong sự kiện mousedown
 
     function commit(){
       const text = input.value.trim();
@@ -888,13 +1356,41 @@ function setupBoard(){
 
   window._allObjects = [];
   window._redrawAll = redrawAll;
+  window._redrawDeck = redrawDeck;
   window._drawOne = (obj) => drawBoardObject(ctx, canvas, obj); // vẽ thêm 1 đối tượng mới, không cần vẽ lại toàn bộ
   function redrawAll(){
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    (window._allObjects || []).forEach(obj => drawBoardObject(ctx, canvas, obj));
+    drawPageDividers(ctx, canvas);
+    (window._allObjects || []).forEach(entry => drawBoardObject(ctx, canvas, entry.data));
+    drawSelectionOverlay(ctx, canvas);
+  }
+  function redrawDeck(){
+    deckCtx.clearRect(0, 0, deckCanvas.width, deckCanvas.height);
+    drawDeckLayer(deckCtx, deckCanvas); // trang slide đang trình chiếu — nằm ở lớp riêng, không cuộn theo bảng
   }
 
   updateBoardHint();
+}
+
+function drawPageDividers(ctx, canvas){
+  const pageH = canvas.height / PAGES_COUNT;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(232,185,74,.25)';
+  ctx.setLineDash([10, 6]);
+  ctx.lineWidth = 1;
+  ctx.font = '12px Inter, sans-serif';
+  ctx.fillStyle = 'rgba(245,241,232,.35)';
+  for (let i = 1; i < PAGES_COUNT; i++) {
+    const y = pageH * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvas.width, y);
+    ctx.stroke();
+  }
+  for (let i = 0; i < PAGES_COUNT; i++) {
+    ctx.fillText(`Trang ${i + 1}`, 10, pageH * i + 18);
+  }
+  ctx.restore();
 }
 
 function drawLineNormalized(ctx, canvas, p1, p2, color){
@@ -939,40 +1435,144 @@ function getCachedImage(src){
   return imageCache[src];
 }
 
+// ================= Trình chiếu PDF/PPT (nhiều trang, lật qua lại, đồng bộ cho cả lớp/nhóm) =================
+function getDeckPageImage(deckId, pageIndex, onReady){
+  const key = deckId + ':' + pageIndex;
+  if (deckPageCache[key]) return deckPageCache[key];
+  const img = new Image();
+  deckPageCache[key] = img; // đặt trước để tránh gọi Firestore nhiều lần khi đang tải
+  strokesRef.doc('__deck__').collection('pages').doc(String(pageIndex)).get().then((doc) => {
+    const data = doc.data();
+    if (data && data.dataUrl) {
+      img.onload = () => { if (onReady) onReady(); };
+      img.src = data.dataUrl;
+    }
+  }).catch(() => {});
+  return img;
+}
+
+function drawDeckLayer(ctx, canvas){
+  if (!activeDeck) return;
+  const img = getDeckPageImage(activeDeck.deckId, activeDeck.currentPage, () => { if (window._redrawDeck) window._redrawDeck(); });
+  const boxX = 0.05 * canvas.width, boxY = 0.06 * canvas.height;
+  const boxW = 0.9 * canvas.width, boxH = 0.78 * canvas.height;
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+  if (img.complete && img.naturalWidth) {
+    const scale = Math.min(boxW / img.naturalWidth, boxH / img.naturalHeight);
+    const drawW = img.naturalWidth * scale, drawH = img.naturalHeight * scale;
+    const drawX = boxX + (boxW - drawW) / 2, drawY = boxY + (boxH - drawH) / 2;
+    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+  }
+}
+
+function updateDeckUI(){
+  const bar = document.getElementById('deck-controls');
+  if (!bar) return;
+  if (!activeDeck) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  document.getElementById('deck-page-label').textContent = `Trang ${activeDeck.currentPage + 1}/${activeDeck.totalPages}`;
+  const allowed = canDraw();
+  document.getElementById('deck-prev-btn').disabled = !allowed || activeDeck.currentPage <= 0;
+  document.getElementById('deck-next-btn').disabled = !allowed || activeDeck.currentPage >= activeDeck.totalPages - 1;
+  document.getElementById('deck-close-btn').style.display = allowed ? 'inline-block' : 'none';
+}
+
+function deckPrevSlide(){
+  if (!activeDeck || !canDraw()) return;
+  strokesRef.doc('__deck__').update({ currentPage: Math.max(0, activeDeck.currentPage - 1) });
+}
+function deckNextSlide(){
+  if (!activeDeck || !canDraw()) return;
+  strokesRef.doc('__deck__').update({ currentPage: Math.min(activeDeck.totalPages - 1, activeDeck.currentPage + 1) });
+}
+async function closeDeck(){
+  if (!canDraw()) return;
+  const deckDocRef = strokesRef.doc('__deck__');
+  try {
+    const pagesSnap = await deckDocRef.collection('pages').get();
+    const batch = db.batch();
+    pagesSnap.docs.forEach(d => batch.delete(d.ref));
+    batch.delete(deckDocRef);
+    await batch.commit();
+  } catch (e) { console.warn('Không dọn được slide:', e); }
+}
+
 function listenStrokes(){
   if (unsubStrokes) unsubStrokes();
   renderedStrokeIds = new Set();
   window._allObjects = [];
+  activeDeck = null;
+  updateDeckUI();
   if (window._redrawAll) window._redrawAll();
+  if (window._redrawDeck) window._redrawDeck();
   unsubStrokes = strokesRef.orderBy('ts').onSnapshot((snap) => {
-    let needFullRedraw = false;
+    let deckChanged = false;
+    let strokesCleared = false;
+    let anyModified = false;
     snap.docChanges().forEach((change) => {
+      if (change.doc.id === '__deck__') {
+        activeDeck = (change.type === 'removed') ? null : change.doc.data();
+        deckChanged = true;
+        return;
+      }
       if (change.type === 'added' && !renderedStrokeIds.has(change.doc.id)) {
         renderedStrokeIds.add(change.doc.id);
         const data = change.doc.data();
         window._allObjects = window._allObjects || [];
-        window._allObjects.push(data);
+        window._allObjects.push({ id: change.doc.id, data });
         if (window._drawOne) window._drawOne(data); // vẽ thêm, không vẽ lại từ đầu -> mượt hơn khi bảng có nhiều nét
       }
-      if (change.type === 'removed') needFullRedraw = true; // chỉ xảy ra khi "Xoá bảng"
+      if (change.type === 'modified') {
+        // xảy ra khi ai đó di chuyển/resize 1 vật bằng công cụ con trỏ
+        const entry = (window._allObjects || []).find(o => o.id === change.doc.id);
+        if (entry) { entry.data = change.doc.data(); anyModified = true; }
+      }
+      if (change.type === 'removed') {
+        window._allObjects = (window._allObjects || []).filter(o => o.id !== change.doc.id);
+        renderedStrokeIds.delete(change.doc.id);
+        strokesCleared = true;
+      }
     });
-    if (needFullRedraw) {
-      window._allObjects = [];
-      renderedStrokeIds = new Set();
-      if (window._redrawAll) window._redrawAll();
-    }
+    if (strokesCleared || anyModified) window._redrawAll && window._redrawAll();
+    if (deckChanged) { updateDeckUI(); window._redrawDeck && window._redrawDeck(); }
   });
+}
+
+function getObjectPageY(data){
+  if (data.points && data.points.length) return data.points[0].y;
+  return typeof data.y === 'number' ? data.y : 0;
+}
+
+// Chỉ xoá nội dung của trang đang xem (dựa theo vị trí cuộn hiện tại), không đụng tới các trang khác
+async function clearCurrentPage(){
+  if (!isTeacher) return;
+  const scrollEl = document.getElementById('board-scroll');
+  const pageH = scrollEl.clientHeight || 1;
+  const pageIndex = Math.min(PAGES_COUNT - 1, Math.round(scrollEl.scrollTop / pageH));
+  const yMin = pageIndex / PAGES_COUNT;
+  const yMax = (pageIndex + 1) / PAGES_COUNT;
+  const toDelete = (window._allObjects || []).filter(o => {
+    const y = getObjectPageY(o.data);
+    return y >= yMin && y < yMax;
+  });
+  if (toDelete.length === 0) return;
+  const batch = db.batch();
+  toDelete.forEach(o => batch.delete(strokesRef.doc(o.id)));
+  await batch.commit();
 }
 
 async function clearBoard(){
   if (!isTeacher) return;
   const snap = await strokesRef.get();
   const batch = db.batch();
-  snap.docs.forEach(d => batch.delete(d.ref));
+  snap.docs.forEach(d => { if (d.id !== '__deck__') batch.delete(d.ref); });
   await batch.commit();
+  await closeDeck(); // đóng luôn slide đang trình chiếu (nếu có) và dọn ảnh các trang
   window._allObjects = [];
   renderedStrokeIds = new Set();
   if (window._redrawAll) window._redrawAll();
+  if (window._redrawDeck) window._redrawDeck();
 }
 
 // ================= Tải ảnh / dán ảnh / PDF lên bảng =================
@@ -1058,37 +1658,51 @@ async function onPdfFileChosen(event){
   if (!file) return;
   if (!canDraw()) { alert('Bạn chưa được cấp quyền thao tác trên bảng trắng.'); return; }
 
-  const pageNumStr = window.prompt('Hiển thị trang số mấy trong file PDF này?', '1');
-  if (pageNumStr === null) return;
-  const pageNum = Math.max(1, parseInt(pageNumStr, 10) || 1);
-
+  const statusEl = document.getElementById('deck-upload-status');
   try {
     const arrayBuffer = await file.arrayBuffer();
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    if (pageNum > pdf.numPages) { alert(`File này chỉ có ${pdf.numPages} trang.`); return; }
-    const page = await pdf.getPage(pageNum);
+    const totalPages = pdf.numPages;
 
-    let scale = 1.3;
-    let dataUrl = '', width = 0, height = 0;
-    // hạ dần độ phân giải cho tới khi đủ nhẹ để nhúng thẳng vào Firestore
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const viewport = page.getViewport({ scale });
-      const tmpCanvas = document.createElement('canvas');
-      tmpCanvas.width = viewport.width;
-      tmpCanvas.height = viewport.height;
-      const ctx = tmpCanvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, viewport.width, viewport.height);
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      dataUrl = tmpCanvas.toDataURL('image/jpeg', 0.7);
-      width = viewport.width;
-      height = viewport.height;
-      if (dataUrl.length <= MAX_BOARD_IMAGE_BYTES) break;
-      scale *= 0.7;
+    if (totalPages > 60 && !confirm(`File có ${totalPages} trang, khá nhiều — có thể mất một lúc để xử lý. Vẫn tiếp tục?`)) return;
+    if (activeDeck) await closeDeck(); // dọn slide cũ (nếu có) trước khi tải slide mới
+
+    const deckDocRef = strokesRef.doc('__deck__');
+    const deckId = deckDocRef.id + '-' + Date.now(); // định danh riêng cho lần tải này, dùng làm khoá cache ảnh
+
+    for (let i = 1; i <= totalPages; i++) {
+      statusEl.textContent = `Đang xử lý trang ${i}/${totalPages}...`;
+      const page = await pdf.getPage(i);
+      let scale = 1.3;
+      let dataUrl = '';
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const viewport = page.getViewport({ scale });
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = viewport.width;
+        tmpCanvas.height = viewport.height;
+        const ctx = tmpCanvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, viewport.width, viewport.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        dataUrl = tmpCanvas.toDataURL('image/jpeg', 0.68);
+        if (dataUrl.length <= MAX_BOARD_IMAGE_BYTES) break;
+        scale *= 0.7;
+      }
+      await deckDocRef.collection('pages').doc(String(i - 1)).set({ dataUrl });
     }
-    await addImageObjectToBoard(dataUrl, width, height, { wFrac: 0.5 });
+
+    await deckDocRef.set({
+      type: 'deck-state',
+      deckId,
+      totalPages,
+      currentPage: 0,
+      uid: currentUser.uid,
+      ts: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    statusEl.textContent = '';
   } catch (e) {
+    statusEl.textContent = '';
     alert('Không thể đọc file PDF: ' + e.message);
   }
 }
@@ -1140,8 +1754,9 @@ function toggleHandRaise(){
   handRaised = !handRaised;
   membersRef.doc(currentUser.uid).update({ handRaised }).catch(() => {});
   const btn = document.getElementById('hand-btn');
-  btn.textContent = handRaised ? '🖐️ Đã giơ tay' : '✋ Giơ tay';
-  btn.classList.toggle('raised', handRaised);
+  btn.textContent = handRaised ? '🖐️' : '✋';
+  btn.title = handRaised ? 'Đã giơ tay (bấm để hạ tay)' : 'Giơ tay phát biểu';
+  btn.classList.toggle('on', handRaised);
 }
 
 // ================= Tắt mic tất cả (giáo viên) =================
@@ -1156,10 +1771,7 @@ async function muteAllStudents(){
 function forceMuteLocalMic(){
   forcedMuted = true;
   micOn = false;
-  if (localMediaStream) {
-    const t = localMediaStream.getAudioTracks()[0];
-    if (t) t.enabled = false;
-  }
+  if (micGainedTrack) micGainedTrack.enabled = false;
   updateMicCamButtons();
   updateSelfTileVisual();
   const micBtn = document.getElementById('mic-btn');
@@ -1220,9 +1832,8 @@ async function setupGroupPeer(groupId, otherUid){
   const pc = new RTCPeerConnection(RTC_CONFIG);
   groupMeshPCs[otherUid] = pc;
 
-  if (localMediaStream) {
-    const audioTrack = localMediaStream.getAudioTracks()[0];
-    if (audioTrack) pc.addTrack(audioTrack, localMediaStream);
+  if (localMediaStream && (currentOutgoingAudioTrack || micGainedTrack)) {
+    pc.addTrack(currentOutgoingAudioTrack || micGainedTrack, localMediaStream);
   }
 
   const audioEl = document.createElement('audio');
@@ -1322,6 +1933,8 @@ function listenGroups(){
   });
 }
 
+let lastActivityTs = 0;
+
 function listenLiveState(){
   liveRef.onSnapshot((snap) => {
     const d = snap.data() || {};
@@ -1332,7 +1945,45 @@ function listenLiveState(){
     } else {
       applyStudentScopeFromState();
     }
+    if (d.activity && d.activity.ts && d.activity.ts > lastActivityTs) {
+      lastActivityTs = d.activity.ts;
+      showActivityPopup(d.activity);
+    }
   });
+}
+
+// ================= Xúc xắc & Quay ngẫu nhiên tên (chỉ giáo viên bấm được, cả lớp cùng thấy kết quả) =================
+function rollDice(){
+  if (!isTeacher) return;
+  const value = 1 + Math.floor(Math.random() * 6);
+  liveRef.set({ activity: { type: 'dice', value, ts: Date.now() } }, { merge: true });
+}
+
+function pickRandomStudent(){
+  if (!isTeacher) return;
+  const presentUids = Object.keys(teacherPCs); // học viên đang thật sự kết nối trong buổi
+  if (presentUids.length === 0) { alert('Chưa có học viên nào đang trong buổi học.'); return; }
+  const pickUid = presentUids[Math.floor(Math.random() * presentUids.length)];
+  const entry = membersCache.find(m => m.id === pickUid);
+  const name = entry ? entry.data.name : 'Học viên';
+  liveRef.set({ activity: { type: 'name', value: name, ts: Date.now() } }, { merge: true });
+}
+
+const DICE_FACES = ['', '⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
+function showActivityPopup(activity){
+  const overlay = document.createElement('div');
+  overlay.className = 'activity-popup-overlay';
+  const big = activity.type === 'dice'
+    ? `<div class="activity-dice-face">${DICE_FACES[activity.value] || activity.value}</div><div class="activity-popup-title">Xúc xắc: ${activity.value}</div>`
+    : `<div class="activity-dice-face">🎯</div><div class="activity-popup-title">${escapeHtml(String(activity.value))}</div>`;
+  overlay.innerHTML = `
+    <div class="activity-popup-box">
+      ${big}
+      <button class="btn btn-ghost btn-sm" onclick="this.closest('.activity-popup-overlay').remove()">Đóng</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  setTimeout(() => overlay.remove(), 5000);
 }
 
 function applyStudentScopeFromState(){

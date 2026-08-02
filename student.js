@@ -58,14 +58,26 @@ function listenMyClasses(){
       if (!memberDoc.exists) continue;
       count++;
       const cls = doc.data();
+
+      let session = null;
+      if (cls.activeSessionId) {
+        const sessionDoc = await doc.ref.collection('sessions').doc(cls.activeSessionId).get();
+        if (sessionDoc.exists) {
+          const data = sessionDoc.data();
+          const createdMs = data.createdAt ? data.createdAt.toMillis() : Date.now();
+          if (Date.now() - createdMs <= 6 * 60 * 60 * 1000) session = data; // quá 6 tiếng thì coi như chưa mở, để giáo viên tự dọn khi vào lại
+        }
+      }
+
       const card = document.createElement('div');
       card.className = 'class-card';
+      const actionHtml = session
+        ? `<button class="btn btn-amber btn-sm" onclick="enterSession('${doc.id}','${cls.activeSessionId}')">Vào lớp</button>`
+        : `<button class="btn btn-ghost btn-sm" disabled>Giáo viên chưa mở buổi học</button>`;
       card.innerHTML = `
         <h3 class="chalk">${escapeHtml(cls.name)}</h3>
         <div class="meta">Giáo viên: ${escapeHtml(cls.teacherName || 'Không rõ')}</div>
-        <div class="actions">
-          <button class="btn btn-amber btn-sm" onclick="enterClass('${doc.id}')">Vào lớp</button>
-        </div>
+        <div class="actions">${actionHtml}</div>
       `;
       grid.appendChild(card);
     }
@@ -73,8 +85,8 @@ function listenMyClasses(){
   });
 }
 
-function enterClass(classId){
-  window.location.href = `classroom.html?classId=${classId}`;
+function enterSession(classId, sessionId){
+  window.location.href = `classroom.html?classId=${classId}&sessionId=${sessionId}`;
 }
 
 function escapeHtml(s){

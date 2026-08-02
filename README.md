@@ -3,17 +3,20 @@
 Web app cho phép:
 - Giáo viên tạo tài khoản, tạo nhiều lớp học, mỗi lớp có 1 mã tham gia + link mời
 - Học viên tạo tài khoản, nhập mã lớp để tham gia
-- Trong phòng học: **cả giáo viên lẫn học viên** đều bật/tắt mic, camera riêng (2 chiều thật sự); giáo viên chia sẻ màn hình
-- Bảng trắng dùng chung: bút vẽ, chèn chữ, dán ảnh (Ctrl+V), tải ảnh lên, tải PDF lên (chọn trang hiển thị) — giáo viên cấp quyền thao tác cho từng học viên
+- **Giao diện phòng học kiểu ClassIn**: bảng đen full màn hình, camera nổi nhỏ gọn góc trái (kéo đi đâu tuỳ ý), thanh công cụ dọc bên phải, chat/danh sách học viên trượt ra khi cần
+- Trong phòng học: **cả giáo viên lẫn học viên** đều bật/tắt mic, camera riêng (2 chiều thật sự); giáo viên chia sẻ màn hình, có thể chọn kèm âm thanh máy tính hay không
+- Bảng trắng dùng chung: **công cụ con trỏ** (chọn/di chuyển/resize ảnh, chữ, nét vẽ — tránh đè lên nhau), bút vẽ, chèn chữ, dán ảnh (Ctrl+V), tải ảnh lên, **trình chiếu PDF/PPT nhiều trang có nút Trước/Sau lật qua lại, đồng bộ cho cả lớp**, **cuộn được 5 trang** (xoá riêng từng trang hoặc xoá hết, tách biệt hoàn toàn với slide PDF/PPT đang mở) — giáo viên cấp quyền thao tác cho từng học viên
+- 🎲 Xúc xắc & 🎡 Quay ngẫu nhiên tên học viên đang tham gia (chỉ giáo viên bấm được, cả lớp cùng thấy kết quả)
 - 💬 Chat trực tiếp trong lớp
 - ✋ Học viên giơ tay phát biểu — giáo viên thấy và có thể "hạ tay"
 - ⭐ Giáo viên tặng sao thưởng cho học viên
 - 🔇 Giáo viên tắt mic của cả lớp (hoặc từng người) bất cứ lúc nào
 - ⏱️ Đồng hồ đếm thời gian buổi học
+- 📅 **Buổi học riêng biệt cho từng lần dạy**: giáo viên "Mở buổi học" (chọn giờ bắt đầu hoặc để trống = bắt đầu ngay), mỗi buổi có bảng/chat/slide/nhóm hoàn toàn mới, tách biệt buổi trước. Học viên chỉ thấy nút "Vào lớp" đơn giản; vào sớm sẽ ở phòng chờ đếm ngược tới giờ. Rớt mạng/thoát nhầm thì vào lại y nguyên. Giáo viên rời phòng được hỏi "Kết thúc buổi" (xoá sạch dữ liệu buổi đó) hay "Chỉ rời" (buổi vẫn còn, vào lại sau được). Buổi học quá 6 tiếng tự động bị dọn.
 - 🖱️ Kéo thả khung camera (của mình/học viên) tới bất kỳ vị trí nào trong tab Video
 - 👥 Chia nhóm nhỏ: giáo viên tạo nhóm, xếp học viên vào nhóm; mỗi nhóm có **bảng trắng + chat + thoại riêng** — học viên cùng nhóm nghe/nói được với nhau; giáo viên có thể ghé nghe hoặc lên tiếng trao đổi trong bất kỳ nhóm nào, rồi rời ra xem tổng thể bất cứ lúc nào
-- 🎚️ Cài đặt âm thanh: chọn thiết bị mic/loa, đo mức thu mic thời gian thực, nghe thử mic, kiểm tra loa, chỉnh âm lượng loa, bật/tắt khử tiếng ồn nền / tự động điều chỉnh âm lượng mic / chế độ nhạc
-- Ghi lại buổi học và tải về máy (định dạng .webm)
+- 🎚️ Cài đặt âm thanh: chọn thiết bị mic/loa, đo mức thu mic thời gian thực, nghe thử mic, kiểm tra loa, **chỉnh âm lượng mic lẫn loa**, bật/tắt khử tiếng ồn nền / tự động điều chỉnh âm lượng mic / chế độ nhạc
+- **Ghi lại buổi học (chỉ giáo viên bấm được)** — ghi toàn bộ những gì hiển thị trên trang (bảng, mọi camera, cả nội dung đang chia sẻ màn hình nếu có), âm thanh trộn cả mic giáo viên lẫn mic mọi học viên. File **tải thẳng về máy đang bấm ghi** (thư mục Downloads mặc định của trình duyệt) — không lưu lên đâu khác, học viên không truy cập được.
 
 Toàn bộ là **file tĩnh** (HTML/CSS/JS thuần, không cần build) + **Firebase** làm backend (miễn phí ở quy mô nhỏ).
 
@@ -75,12 +78,16 @@ service cloud.firestore {
       match /live/{doc=**} {
         allow read, write: if request.auth != null;
       }
+
+      match /sessions/{doc=**} {
+        allow read, write: if request.auth != null;
+      }
     }
   }
 }
 ```
 
-> Rule ở trên vẫn khá "mở" cho phần `live/**` (video signaling, bảng trắng) để đơn giản hoá — phù hợp cho lớp nội bộ, không phù hợp cho ứng dụng công khai quy mô lớn.
+> Rule ở trên vẫn khá "mở" cho phần `sessions/**` (bảng trắng, chat, tín hiệu gọi của từng buổi học) để đơn giản hoá — phù hợp cho lớp nội bộ, không phù hợp cho ứng dụng công khai quy mô lớn. Mục `live/**` giữ lại phòng khi còn dữ liệu cũ từ trước khi có buổi học, không bắt buộc phải có nếu bạn mới tạo project.
 
 ## 5. Giới hạn cần biết (thành thật với bạn)
 
@@ -90,9 +97,14 @@ service cloud.firestore {
 - Cần trình duyệt hỗ trợ WebRTC (Chrome, Edge, Firefox mới); Safari cần thử thêm vì đôi khi có khác biệt nhỏ về API chia sẻ màn hình.
 - Mic/camera của học viên và giáo viên xin quyền ngay khi vào phòng (kể cả khi đang tắt) để tránh phải "đàm phán lại" kết nối — nếu bạn từ chối cấp quyền lúc đó, cần tải lại trang sau khi bật quyền trong cài đặt trình duyệt.
 - "Tắt mic tất cả" là tắt mềm (yêu cầu qua dữ liệu), học viên vẫn thấy trạng thái bị tắt và không tự bật lại được cho đến khi giáo viên mở lại — đây không phải chặn ở tầng hệ điều hành.
-- Tải PDF lên bảng chỉ hiển thị 1 trang bạn chọn dưới dạng ảnh tĩnh (không phải trình xem PDF nhiều trang cuộn được).
+- **Trình chiếu chỉ đọc được file PDF, không đọc trực tiếp .pptx** — nếu có file PowerPoint, xuất ra PDF trước (PowerPoint: File → Export → Create PDF; Google Slides: File → Download → PDF), mất khoảng vài giây, rồi tải file PDF đó lên.
+- File PDF nhiều trang (vài chục trang) sẽ mất khoảng vài giây tới nửa phút để xử lý xong (mỗi trang được nén rồi lưu riêng), có hiện chữ "Đang xử lý trang X/Y..." trong lúc chờ.
+- Trình chiếu dùng chung theo "Cả lớp" hoặc theo từng nhóm nhỏ (nếu đang ở chế độ xem của nhóm nào thì trình chiếu thuộc về nhóm đó, tách biệt với các nhóm khác) — xem mục chia nhóm ở trên.
 - **Ảnh/PDF trên bảng trắng không dùng Firebase Storage** (tránh phải nâng cấp gói trả phí) mà được nén và nhúng thẳng vào Firestore — ảnh sẽ tự động giảm kích thước/chất lượng cho vừa, nhưng ảnh quá to hoặc quá chi tiết (ảnh chụp màn hình full HD, PDF nhiều chữ nhỏ phóng to...) có thể bị từ chối kèm thông báo, khi đó thử ảnh nhỏ hơn hoặc chụp/crop lại phần cần thiết.
+- **Việc tự xoá buổi học quá 6 tiếng không chạy nền thật sự** (vì không có server riêng) — nó chỉ được kiểm tra và dọn dẹp vào lúc có người (giáo viên hoặc học viên) mở lại trang lớp/vào buổi đó. Nếu không ai mở lại trang trong thời gian dài, buổi học cũ có thể vẫn còn nằm trong Firestore tới khi có người ghé qua kiểm tra — không tốn thêm chi phí đáng kể ở quy mô nhỏ, nhưng không phải dọn dẹp tức thời đúng giờ.
 - **Chia nhóm nhỏ có thoại riêng giữa các học viên** (kết nối trực tiếp theo từng nhóm, không qua giáo viên) — với lớp tối đa 12 người và nhóm nhỏ vài người, mức tải này rất nhẹ. Video vẫn chỉ ở kênh chính (giáo viên ⟷ từng học viên); trong nhóm nhỏ chỉ có audio, không có video riêng, để giữ mọi thứ gọn nhẹ.
+- **Ghi hình sẽ hiện hộp thoại chọn "chia sẻ màn hình" của trình duyệt** — giáo viên cần chọn đúng nguồn muốn ghi: chọn **"Tab này"** để ghi gọn trang lớp học, hoặc chọn **"Toàn bộ màn hình"** nếu muốn ghi luôn cả nội dung ở ứng dụng khác đang được chia sẻ ra ngoài lớp. Đây là cơ chế bảo mật của trình duyệt, không thể bỏ qua bước chọn này.
+- **Trên điện thoại, khi đang cầm bút/chữ thì không cuộn bảng bằng 1 ngón tay được** (vì 1 ngón vừa dùng để vẽ vừa dùng để cuộn sẽ xung đột) — muốn cuộn bảng trên điện thoại, chuyển sang công cụ con trỏ (🖱️) rồi vuốt ở chỗ trống.
 - Chọn thiết bị loa (setSinkId) chỉ hoạt động trên trình duyệt gốc Chromium (Chrome, Edge...) — Firefox và Safari chưa hỗ trợ, khi đó chỉ chỉnh được mic + âm lượng, việc chọn loa cụ thể cần đổi trong cài đặt hệ điều hành.
 - Vị trí kéo thả của khung camera chỉ lưu cục bộ trên trình duyệt của từng người xem, không đồng bộ cho người khác.
 
